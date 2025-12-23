@@ -96,15 +96,15 @@ func (sm *StreamManager) AddStream(s network.Stream) {
 	}
 	sm.mu.Unlock()
 
-	// 🔽 NEW: send nickname after secure session
+	go sm.readLoop(s)
+
+	time.Sleep(10 * time.Millisecond)
 	if sm.localNick != "" {
 		enc, err := session.Encrypt([]byte(NickPrefix + sm.localNick))
 		if err == nil {
 			_, _ = s.Write([]byte(enc + "\n"))
 		}
 	}
-
-	go sm.readLoop(s)
 }
 
 func (sm *StreamManager) readLoop(s network.Stream) {
@@ -233,6 +233,7 @@ func (sm *StreamManager) HandleInput() {
 
 		enc, err := session.Encrypt([]byte(text))
 		if err != nil {
+			fmt.Printf("Failed to encrypt message: %v\n", colorize(91, err.Error()))
 			continue
 		}
 
