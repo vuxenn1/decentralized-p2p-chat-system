@@ -132,8 +132,7 @@ func (s *Session) Encrypt(plain []byte) (string, error) {
 	ct := s.aead.Seal(nil, nonce, plain, nil)
 
 	// Return as base64 string for text transmission
-	result := fmt.Sprint(base64.StdEncoding.EncodeToString(nonce) + "." + base64.StdEncoding.EncodeToString(ct))
-	return result, nil
+	return fmt.Sprint(base64.StdEncoding.EncodeToString(nonce) + "." + base64.StdEncoding.EncodeToString(ct)), nil
 }
 
 // Decrypt converts encrypted packet back to plaintext.
