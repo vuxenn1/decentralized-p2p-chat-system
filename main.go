@@ -27,9 +27,9 @@ import (
 	"p2p-chat/security"
 )
 
-const DISCOVERY_TIME = 5              // Discovery time threshold in seconds
-const ChatProtocolID = "/p2pchat/0.8" // Custom chat protocol ID
-const NickPrefix = "__NICKNAME__:"    // control message for nicknames
+const DISCOVERY_TIME = 5               // Discovery time threshold in seconds
+const ChatProtocolID = "/p2pchat/0.75" // Custom chat protocol ID
+const NickPrefix = "__NICKNAME__:"     // control message for nicknames
 
 func colorize(color int, text string) string {
 	return fmt.Sprintf("\x1b[%dm%s\x1b[0m", color, text)

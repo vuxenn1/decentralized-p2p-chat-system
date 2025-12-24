@@ -12,4 +12,4 @@ type DiscoveredPeer struct {
 }
 
 // DefaultNamespace scopes discovery to this chat application.
-const DefaultNamespace = "p2pchat/etu"
+const DefaultNamespace = "p2p-chat/etu"
