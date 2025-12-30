@@ -22,9 +22,9 @@ A decentralized Peer-to-Peer messaging application developed in Go that allows p
    ```bash
    go run main.go --identity another_custom_nick
    ```
-3. Use CLI commands such as `/discover`, `/connect`, `/help`, etc.
-4. Each peer loads or creates a persistent cryptographic identity.
-5. Peers automatically discover each other through the decentralized network.
+3. Each peer loads or creates a persistent cryptographic identity.
+4. Peers discover each other through the decentralized network.
+5. Use CLI commands such as `/discover`, `/connect`, `/help`, etc.
 6. Select a peer and start sending messages.
 ---
 All messages are exchanged directly between peers using encrypted peer-to-peer connections.
