@@ -9,11 +9,11 @@ import (
 	"sync"
 	"time"
 
-	"p2p-chat/discovery"
-
 	"github.com/gorilla/websocket"
 	peerstore "github.com/libp2p/go-libp2p/core/peer"
 	multiaddr "github.com/multiformats/go-multiaddr"
+
+	"p2p-chat/discovery"
 )
 
 var wsUpgrader = websocket.Upgrader{
@@ -60,13 +60,13 @@ func StartWebServer(sm *StreamManager) {
 	}
 
 	port := listener.Addr().(*net.TCPAddr).Port
-	webRoot := filepath.Join(".", "ui")
+	webRoot := filepath.Join(".", "web")
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", handleWebSocket)
 	mux.Handle("/", http.FileServer(http.Dir(webRoot)))
 
-	fmt.Printf("\nWeb interface: %s\n\n", colorize(92, fmt.Sprintf("http://localhost:%d", port)))
+	fmt.Printf("\n🌐 Web interface: %s\n\n", colorize(92, fmt.Sprintf("http://localhost:%d", port)))
 
 	go http.Serve(listener, mux)
 }
@@ -118,7 +118,7 @@ func (wc *WebClient) handleWSMessage(msg WSMessage) {
 			Address string `json:"address"`
 		}
 		json.Unmarshal(msg.Payload, &p)
-		wc.sm.ConnectToPeer(p.Address)
+		wc.sm.connectToPeer(p.Address)
 
 	case "discover_peers":
 		go wc.handleDiscoverPeers()
@@ -126,7 +126,7 @@ func (wc *WebClient) handleWSMessage(msg WSMessage) {
 }
 
 func (wc *WebClient) handleDiscoverPeers() {
-	if wc.sm.DHT == nil {
+	if wc.sm.dht == nil {
 		wc.broadcast("discovery_status", map[string]string{
 			"status": "DHT not initialized",
 		})
@@ -137,10 +137,10 @@ func (wc *WebClient) handleDiscoverPeers() {
 		"status": "Discovering peers...",
 	})
 
-	ctx, cancel := wc.sm.Ctx, func() {}
+	ctx, cancel := wc.sm.ctx, func() {}
 	defer cancel()
 
-	peerChan, err := wc.sm.DHT.DiscoverPeers(ctx, discovery.DefaultNamespace)
+	peerChan, err := wc.sm.dht.DiscoverPeers(ctx, discovery.DefaultNamespace)
 	if err != nil {
 		wc.broadcast("discovery_status", map[string]string{
 			"status": fmt.Sprintf("Discovery failed: %v", err),
@@ -187,9 +187,9 @@ loop:
 
 func (wc *WebClient) sendInitialState(conn *websocket.Conn) {
 	info := map[string]interface{}{
-		"id":        wc.sm.Node.ID().String(),
-		"addresses": wc.formatAddrs(wc.sm.Node.Addrs()),
-		"nickname":  wc.sm.LocalNick,
+		"id":        wc.sm.node.ID().String(),
+		"addresses": wc.formatAddrs(wc.sm.node.Addrs()),
+		"nickname":  wc.sm.localNick,
 	}
 	wc.sendToClient(conn, "node_info", info)
 	wc.sendToClient(conn, "peers_list", wc.getPeersList())
@@ -197,18 +197,18 @@ func (wc *WebClient) sendInitialState(conn *websocket.Conn) {
 }
 
 func (wc *WebClient) getPeersList() []map[string]interface{} {
-	wc.sm.Mu.RLock()
-	defer wc.sm.Mu.RUnlock()
+	wc.sm.mu.RLock()
+	defer wc.sm.mu.RUnlock()
 
 	peers := make([]map[string]interface{}, 0)
-	for peerID := range wc.sm.Streams {
+	for peerID := range wc.sm.streams {
 		id := peerID.String()
 		short := id
 		if len(id) > 8 {
 			short = id[len(id)-8:]
 		}
 
-		nick := wc.sm.PeerNicks[peerID]
+		nick := wc.sm.peerNicks[peerID]
 		if nick == "" {
 			nick = short
 		}
@@ -233,10 +233,10 @@ func (wc *WebClient) sendMessageToPeer(peerIDStr, content string) {
 		return
 	}
 
-	wc.sm.Mu.RLock()
-	stream, ok := wc.sm.Streams[peerID]
-	session, sessionOk := wc.sm.Sessions[peerID]
-	wc.sm.Mu.RUnlock()
+	wc.sm.mu.RLock()
+	stream, ok := wc.sm.streams[peerID]
+	session, sessionOk := wc.sm.sessions[peerID]
+	wc.sm.mu.RUnlock()
 
 	if !ok || !sessionOk {
 		return
@@ -248,7 +248,7 @@ func (wc *WebClient) sendMessageToPeer(peerIDStr, content string) {
 	}
 
 	stream.Write([]byte(enc + "\n"))
-	wc.addMessage(wc.sm.Node.ID().String(), wc.sm.LocalNick, content, true)
+	wc.addMessage(wc.sm.node.ID().String(), wc.sm.localNick, content, true)
 }
 
 func (wc *WebClient) addMessage(from, fromName, content string, isOwn bool) {

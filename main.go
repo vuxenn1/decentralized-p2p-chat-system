@@ -36,38 +36,38 @@ func colorize(color int, text string) string {
 }
 
 type StreamManager struct {
-	Streams   map[peerstore.ID]network.Stream
-	ActiveID  peerstore.ID
-	Mu        sync.RWMutex
-	InputChan chan string
-	Node      host.Host
-	Ctx       context.Context
+	streams   map[peerstore.ID]network.Stream
+	activeID  peerstore.ID
+	mu        sync.RWMutex
+	inputChan chan string
+	node      host.Host
+	ctx       context.Context
 
-	DHT      *discovery.DHTService
-	Sessions map[peerstore.ID]*security.Session
+	dht      *discovery.DHTService // Handles DHT peer discovery
+	sessions map[peerstore.ID]*security.Session
 
-	LocalNick string
-	PeerNicks map[peerstore.ID]string
+	localNick string
+	peerNicks map[peerstore.ID]string
 }
 
-func newStreamManager(node host.Host, Ctx context.Context) *StreamManager {
+func newStreamManager(node host.Host, ctx context.Context) *StreamManager {
 	return &StreamManager{
-		Streams:   make(map[peerstore.ID]network.Stream),
-		InputChan: make(chan string, 100),
-		Node:      node,
-		Ctx:       Ctx,
+		streams:   make(map[peerstore.ID]network.Stream),
+		inputChan: make(chan string, 100),
+		node:      node,
+		ctx:       ctx,
 
-		Sessions:  make(map[peerstore.ID]*security.Session),
-		PeerNicks: make(map[peerstore.ID]string),
+		sessions:  make(map[peerstore.ID]*security.Session),
+		peerNicks: make(map[peerstore.ID]string),
 	}
 }
 
 func (sm *StreamManager) getSortedPeers() []peerstore.ID {
-	sm.Mu.RLock()
-	defer sm.Mu.RUnlock()
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
 
-	peers := make([]peerstore.ID, 0, len(sm.Streams))
-	for pid := range sm.Streams {
+	peers := make([]peerstore.ID, 0, len(sm.streams))
+	for pid := range sm.streams {
 		peers = append(peers, pid)
 	}
 
@@ -87,20 +87,20 @@ func (sm *StreamManager) AddStream(s network.Stream) {
 		return
 	}
 
-	sm.Mu.Lock()
-	sm.Streams[peerID] = s
-	sm.Sessions[peerID] = session
+	sm.mu.Lock()
+	sm.streams[peerID] = s
+	sm.sessions[peerID] = session
 
-	if sm.ActiveID == "" {
-		sm.ActiveID = peerID
+	if sm.activeID == "" {
+		sm.activeID = peerID
 	}
-	sm.Mu.Unlock()
+	sm.mu.Unlock()
 
 	go sm.readLoop(s)
 
 	time.Sleep(10 * time.Millisecond)
-	if sm.LocalNick != "" {
-		enc, err := session.Encrypt([]byte(NickPrefix + sm.LocalNick))
+	if sm.localNick != "" {
+		enc, err := session.Encrypt([]byte(NickPrefix + sm.localNick))
 		if err == nil {
 			_, _ = s.Write([]byte(enc + "\n"))
 		}
@@ -135,14 +135,14 @@ func (sm *StreamManager) readLoop(s network.Stream) {
 				fmt.Printf("Error reading from [%s]: %v\n", short, err)
 			}
 
-			sm.Mu.Lock()
-			delete(sm.Streams, peerID)
-			delete(sm.Sessions, peerID)
+			sm.mu.Lock()
+			delete(sm.streams, peerID)
+			delete(sm.sessions, peerID)
 
-			if sm.ActiveID == peerID {
-				sm.ActiveID = ""
+			if sm.activeID == peerID {
+				sm.activeID = ""
 			}
-			sm.Mu.Unlock()
+			sm.mu.Unlock()
 
 			// WEB: Notify web interface about peer disconnect
 			NotifyWebPeerUpdate()
@@ -151,9 +151,9 @@ func (sm *StreamManager) readLoop(s network.Stream) {
 			return
 		}
 
-		sm.Mu.RLock()
-		session := sm.Sessions[peerID]
-		sm.Mu.RUnlock()
+		sm.mu.RLock()
+		session := sm.sessions[peerID]
+		sm.mu.RUnlock()
 
 		plain, err := session.Decrypt(strings.TrimSpace(line))
 		if err != nil {
@@ -166,10 +166,10 @@ func (sm *StreamManager) readLoop(s network.Stream) {
 			nick := strings.TrimSpace(strings.TrimPrefix(msg, NickPrefix))
 			if nick != "" {
 
-				sm.Mu.Lock()
-				old := sm.PeerNicks[peerID]
-				sm.PeerNicks[peerID] = nick
-				sm.Mu.Unlock()
+				sm.mu.Lock()
+				old := sm.peerNicks[peerID]
+				sm.peerNicks[peerID] = nick
+				sm.mu.Unlock()
 
 				// print only when nickname is first learned or changed
 				if old != nick {
@@ -192,12 +192,12 @@ func (sm *StreamManager) readLoop(s network.Stream) {
 		}
 
 		// Display nickname if known
-		sm.Mu.RLock()
+		sm.mu.RLock()
 		display := short
-		if n, ok := sm.PeerNicks[peerID]; ok {
+		if n, ok := sm.peerNicks[peerID]; ok {
 			display = n
 		}
-		sm.Mu.RUnlock()
+		sm.mu.RUnlock()
 
 		coloredID := colorize(96, display)
 		coloredTime := colorize(93, time.Now().Format("15:04"))
@@ -214,9 +214,9 @@ func (sm *StreamManager) displayName(peerID peerstore.ID) (nick string, shortID 
 		shortID = shortID[len(shortID)-8:]
 	}
 
-	sm.Mu.RLock()
-	nick = sm.PeerNicks[peerID]
-	sm.Mu.RUnlock()
+	sm.mu.RLock()
+	nick = sm.peerNicks[peerID]
+	sm.mu.RUnlock()
 
 	return nick, shortID
 }
@@ -232,13 +232,13 @@ func (sm *StreamManager) HandleInput() {
 			continue
 		}
 
-		sm.Mu.RLock()
-		ActiveID := sm.ActiveID
-		stream, exists := sm.Streams[ActiveID]
-		session := sm.Sessions[ActiveID]
-		sm.Mu.RUnlock()
+		sm.mu.RLock()
+		activeID := sm.activeID
+		stream, exists := sm.streams[activeID]
+		session := sm.sessions[activeID]
+		sm.mu.RUnlock()
 
-		if !exists || ActiveID == "" {
+		if !exists || activeID == "" {
 			fmt.Println("No active peer, Use '/list' to see available connections.")
 			continue
 		}
@@ -252,13 +252,13 @@ func (sm *StreamManager) HandleInput() {
 		_, err = stream.Write([]byte(enc + "\n"))
 		if err != nil {
 			fmt.Printf("Error, message sending to peer: %v\n", err)
-			sm.Mu.Lock()
-			delete(sm.Streams, ActiveID)
-			delete(sm.Sessions, ActiveID)
-			if sm.ActiveID == ActiveID {
-				sm.ActiveID = ""
+			sm.mu.Lock()
+			delete(sm.streams, activeID)
+			delete(sm.sessions, activeID)
+			if sm.activeID == activeID {
+				sm.activeID = ""
 			}
-			sm.Mu.Unlock()
+			sm.mu.Unlock()
 		}
 	}
 }
@@ -285,7 +285,7 @@ func (sm *StreamManager) handleCommand(cmd string) {
 			fmt.Println("Usage: '/connect <multiaddr>'")
 			return
 		}
-		sm.ConnectToPeer(parts[1])
+		sm.connectToPeer(parts[1])
 	case "/discover":
 		sm.discoverPeers()
 	case "/help":
@@ -307,7 +307,7 @@ func (sm *StreamManager) listPeers() {
 
 	for i, peerID := range peers {
 		activeMarker := " "
-		if peerID == sm.ActiveID {
+		if peerID == sm.activeID {
 			activeMarker = ">"
 		}
 
@@ -336,11 +336,11 @@ func (sm *StreamManager) switchPeer(arg string) {
 		return
 	}
 
-	sm.Mu.Lock()
-	sm.ActiveID = peers[num-1]
-	sm.Mu.Unlock()
+	sm.mu.Lock()
+	sm.activeID = peers[num-1]
+	sm.mu.Unlock()
 
-	nick, shortID := sm.displayName(sm.ActiveID)
+	nick, shortID := sm.displayName(sm.activeID)
 
 	if nick != "" {
 		fmt.Printf("Switched to peer: [%s] [%s]\n", colorize(92, nick), colorize(96, shortID))
@@ -365,7 +365,7 @@ func (sm *StreamManager) showHelp() {
 	fmt.Printf("Type any message (without %s) to send to active peer\n\n", colorize(93, "/"))
 }
 
-func (sm *StreamManager) ConnectToPeer(address string) {
+func (sm *StreamManager) connectToPeer(address string) {
 	addr, err := multiaddr.NewMultiaddr(address)
 	if err != nil {
 		fmt.Printf("Invalid multiaddr: %v\n", err)
@@ -378,9 +378,9 @@ func (sm *StreamManager) ConnectToPeer(address string) {
 		return
 	}
 
-	sm.Mu.RLock()
-	_, alreadyConnected := sm.Streams[peerInfo.ID]
-	sm.Mu.RUnlock()
+	sm.mu.RLock()
+	_, alreadyConnected := sm.streams[peerInfo.ID]
+	sm.mu.RUnlock()
 
 	if alreadyConnected {
 		fmt.Println("Already connected to this peer")
@@ -389,12 +389,12 @@ func (sm *StreamManager) ConnectToPeer(address string) {
 
 	fmt.Printf("Connecting to peer...\n")
 
-	if err := sm.Node.Connect(sm.Ctx, *peerInfo); err != nil {
+	if err := sm.node.Connect(sm.ctx, *peerInfo); err != nil {
 		fmt.Printf("Connection failed: %v\n", err)
 		return
 	}
 
-	s, err := sm.Node.NewStream(sm.Ctx, peerInfo.ID, ChatProtocolID)
+	s, err := sm.node.NewStream(sm.ctx, peerInfo.ID, ChatProtocolID)
 	if err != nil {
 		fmt.Printf("Failed to open stream: %v\n", err)
 		return
@@ -418,7 +418,7 @@ func (sm *StreamManager) ConnectToPeer(address string) {
 
 // discoverPeers queries the DHT and prints discovered peers.
 func (sm *StreamManager) discoverPeers() {
-	if sm.DHT == nil {
+	if sm.dht == nil {
 		fmt.Println(colorize(91, "DHT not initialized"))
 		return
 	}
@@ -426,10 +426,10 @@ func (sm *StreamManager) discoverPeers() {
 	fmt.Printf(colorize(94, "Discovering peers on the network... %s\n"), colorize(93, fmt.Sprintf("Threshold is '%d' seconds", DISCOVERY_TIME)))
 
 	// Cap discovery time so the prompt stays responsive.
-	Ctx, cancel := context.WithTimeout(sm.Ctx, 30*time.Second)
+	ctx, cancel := context.WithTimeout(sm.ctx, 30*time.Second)
 	defer cancel()
 
-	peerChan, err := sm.DHT.DiscoverPeers(Ctx, discovery.DefaultNamespace)
+	peerChan, err := sm.dht.DiscoverPeers(ctx, discovery.DefaultNamespace)
 	if err != nil {
 		fmt.Printf(colorize(91, "Discovery failed: %v\n"), err)
 		return
@@ -448,7 +448,7 @@ loop:
 		select {
 		case <-timeout:
 			break loop
-		case <-Ctx.Done():
+		case <-ctx.Done():
 			break loop
 		case peer, ok := <-peerChan:
 			if !ok {
@@ -584,7 +584,7 @@ func CreateNode(sm *StreamManager, identityName string) (host.Host, error) {
 	return node, nil
 }
 
-func ConnectToPeer(node host.Host, address string, Ctx context.Context) (peerstore.AddrInfo, error) {
+func ConnectToPeer(node host.Host, address string, ctx context.Context) (peerstore.AddrInfo, error) {
 	addr, err := multiaddr.NewMultiaddr(address)
 	if err != nil {
 		return peerstore.AddrInfo{}, fmt.Errorf("invalid multiaddr: %w", err)
@@ -595,7 +595,7 @@ func ConnectToPeer(node host.Host, address string, Ctx context.Context) (peersto
 		return peerstore.AddrInfo{}, fmt.Errorf("invalid peer info: %w", err)
 	}
 
-	if err := node.Connect(Ctx, *peer); err != nil {
+	if err := node.Connect(ctx, *peer); err != nil {
 		return *peer, fmt.Errorf("connection failed: %w", err)
 	}
 
@@ -621,12 +621,12 @@ func main() {
 	identityName := flag.String("identity", "", "Identity name for testing")
 	flag.Parse()
 
-	Ctx := context.Background()
+	ctx := context.Background()
 
-	sm := newStreamManager(nil, Ctx)
-	sm.LocalNick = *identityName
-	if sm.LocalNick == "" {
-		sm.LocalNick = "anon"
+	sm := newStreamManager(nil, ctx)
+	sm.localNick = *identityName
+	if sm.localNick == "" {
+		sm.localNick = "anon"
 	}
 
 	node, err := CreateNode(sm, *identityName)
@@ -636,21 +636,21 @@ func main() {
 	}
 	defer node.Close()
 
-	sm.Node = node
+	sm.node = node
 
 	// WEB: Start web server
 	go StartWebServer(sm)
 
 	// Initialize discovery via the DHT.
 	fmt.Println(colorize(95, "Initializing DHT..."))
-	dhtService, err := discovery.NewDHTService(Ctx, node)
+	dhtService, err := discovery.NewDHTService(ctx, node)
 	if err != nil {
 		fmt.Printf("Failed to create DHT: %v\n", err)
 		return
 	}
 	defer dhtService.Close()
 
-	sm.DHT = dhtService
+	sm.dht = dhtService
 
 	// Populate routing table before advertising.
 	if err := dhtService.Bootstrap(); err != nil {
@@ -685,12 +685,12 @@ func main() {
 	args := flag.Args()
 	if len(args) > 0 {
 		addr := args[0]
-		peer, err := ConnectToPeer(node, addr, Ctx)
+		peer, err := ConnectToPeer(node, addr, ctx)
 		if err != nil {
 			panic(err)
 		}
 
-		s, err := node.NewStream(Ctx, peer.ID, ChatProtocolID)
+		s, err := node.NewStream(ctx, peer.ID, ChatProtocolID)
 		if err != nil {
 			fmt.Println("Failed to open chat stream:", err)
 			return

@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+    <meta charset="UTF-8">
+    <title>P2P Chat</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<div class="header">
+    <div class="header-top">
+        <div class="logo">
+            <img src="logo.png" alt="P2P Chat Logo" class="logo-img">
+        </div>
+    </div>
+    <div class="node-info">
+        <div class="info-item">
+            <span class="label">Nickname:</span>
+            <span class="value" id="nodeNick">...</span>
+        </div>
+        <div class="info-item">
+            <span class="label">Peer ID:</span>
+            <span class="value" id="nodeId">Connecting...</span>
+        </div>
+        <div class="info-item">
+            <span class="label">Address:</span>
+            <span class="value" id="nodeAddr">Connecting...</span>
+        </div>
+    </div>
+</div>
+
+<div class="main-content">
+    <aside class="sidebar">
+        <div class="sidebar-header">
+            <h2>Connected Peers</h2>
+            <div class="peer-actions">
+                <button class="btn" id="discoverBtn" title="Discover peers on network">Discover</button>
+                <button class="btn" id="connectBtn" title="Connect to specific peer">Connect</button>
+            </div>
+        </div>
+
+        <div id="discoveryStatus" class="discovery-status" style="display: none;"></div>
+
+        <div class="peers-list" id="peersList">
+            <div class="empty-state">
+                <p>No connected peers yet</p>
+                <small>Click "Discover" to find peers</small>
+            </div>
+        </div>
+
+        <div class="discovered-section" id="discoveredSection" style="display: none;">
+            <div class="discovered-header">
+                <h3>Discovered Peers</h3>
+                <button class="btn-close" id="closeDiscovered">✕</button>
+            </div>
+            <div class="discovered-list" id="discoveredList"></div>
+        </div>
+    </aside>
+
+    <main class="chat-area">
+        <div class="chat-header">
+            <h3 id="chatTitle">Select a peer to start chatting</h3>
+            <span class="status" id="statusIndicator">●</span>
+        </div>
+
+        <div class="messages-container" id="messages">
+            <div class="empty-chat">
+                <p>No messages yet</p>
+                <small>Start a conversation by selecting a peer</small>
+            </div>
+        </div>
+
+        <div class="message-input-area">
+            <input type="text" id="messageInput" placeholder="Type your message... " disabled>
+            <button class="btn btn-primary" id="sendBtn" disabled>Send</button>
+        </div>
+    </main>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>
