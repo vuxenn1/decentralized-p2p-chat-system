@@ -66,7 +66,7 @@ func StartWebServer(sm *StreamManager) {
 	mux.HandleFunc("/ws", handleWebSocket)
 	mux.Handle("/", http.FileServer(http.Dir(webRoot)))
 
-	fmt.Printf("\n🌐 Web interface: %s\n\n", colorize(92, fmt.Sprintf("http://localhost:%d", port)))
+	fmt.Printf("\nWeb interface: %s\n\n", colorize(92, fmt.Sprintf("http://localhost:%d", port)))
 
 	go http.Serve(listener, mux)
 }
