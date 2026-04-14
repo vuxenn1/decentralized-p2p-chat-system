@@ -16,11 +16,11 @@ A decentralized Peer-to-Peer messaging application developed in Go that allows p
 ## How to Use
 1. Run the application with a custom identity name:
    ```bash
-   go run main.go --identity custom_nick
+   go run . --identity custom_nick
    ````
 2. Start the program on another terminal or machine with a different identity:
    ```bash
-   go run main.go --identity another_custom_nick
+   go run . --identity another_custom_nick
    ```
 3. Each peer loads or creates a persistent cryptographic identity.
 4. Peers discover each other through the decentralized network.
