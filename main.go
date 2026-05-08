@@ -27,12 +27,31 @@ import (
 	"p2p-chat/security"
 )
 
-const DISCOVERY_TIME = 5               // Discovery time threshold in seconds
-const ChatProtocolID = "/p2pchat/0.75" // Custom chat protocol ID
-const NickPrefix = "__NICKNAME__:"     // control message for nicknames
+const DISCOVERY_TIME = 5
+const ChatProtocolID = "/p2pchat/0.75"
+const NickPrefix = "__NICKNAME__:"
+const ConnReqPrefix = "__CONNREQ__:"
+const ConnAcceptMsg = "__ACCEPT__"
+const ConnRejectMsg = "__REJECT__"
 
 func colorize(color int, text string) string {
 	return fmt.Sprintf("\x1b[%dm%s\x1b[0m", color, text)
+}
+
+func readLine(r io.Reader) (string, error) {
+	var buf []byte
+	b := make([]byte, 1)
+	for {
+		_, err := r.Read(b)
+		if err != nil {
+			return string(buf), err
+		}
+		if b[0] == '\n' {
+			break
+		}
+		buf = append(buf, b[0])
+	}
+	return strings.TrimSpace(string(buf)), nil
 }
 
 type StreamManager struct {
@@ -43,22 +62,28 @@ type StreamManager struct {
 	node      host.Host
 	ctx       context.Context
 
-	dht      *discovery.DHTService // Handles DHT peer discovery
+	dht      *discovery.DHTService
 	sessions map[peerstore.ID]*security.Session
 
 	localNick string
 	peerNicks map[peerstore.ID]string
+
+	pendingApprovals   map[peerstore.ID]chan bool
+	pendingApprovalsMu sync.Mutex
+	pendingRequestNums map[int]peerstore.ID
+	nextRequestNum     int
 }
 
 func newStreamManager(node host.Host, ctx context.Context) *StreamManager {
 	return &StreamManager{
-		streams:   make(map[peerstore.ID]network.Stream),
-		inputChan: make(chan string, 100),
-		node:      node,
-		ctx:       ctx,
-
-		sessions:  make(map[peerstore.ID]*security.Session),
-		peerNicks: make(map[peerstore.ID]string),
+		streams:            make(map[peerstore.ID]network.Stream),
+		inputChan:          make(chan string, 100),
+		node:               node,
+		ctx:                ctx,
+		sessions:           make(map[peerstore.ID]*security.Session),
+		peerNicks:          make(map[peerstore.ID]string),
+		pendingApprovals:   make(map[peerstore.ID]chan bool),
+		pendingRequestNums: make(map[int]peerstore.ID),
 	}
 }
 
@@ -90,7 +115,6 @@ func (sm *StreamManager) AddStream(s network.Stream) {
 	sm.mu.Lock()
 	sm.streams[peerID] = s
 	sm.sessions[peerID] = session
-
 	if sm.activeID == "" {
 		sm.activeID = peerID
 	}
@@ -106,8 +130,100 @@ func (sm *StreamManager) AddStream(s network.Stream) {
 		}
 	}
 
-	// WEB: Notify web interface about peer update
 	NotifyWebPeerUpdate()
+}
+
+func (sm *StreamManager) HandleIncomingStream(s network.Stream) {
+	peerID := s.Conn().RemotePeer()
+	shortID := peerID.String()
+	if len(shortID) > 8 {
+		shortID = shortID[len(shortID)-8:]
+	}
+
+	line, err := readLine(s)
+	if err != nil || !strings.HasPrefix(line, ConnReqPrefix) {
+		_ = s.Close()
+		return
+	}
+
+	nickname := strings.TrimPrefix(line, ConnReqPrefix)
+	if nickname == "" {
+		nickname = shortID
+	}
+
+	// Assign a request number
+	sm.pendingApprovalsMu.Lock()
+	sm.nextRequestNum++
+	reqNum := sm.nextRequestNum
+	ch := make(chan bool, 1)
+	sm.pendingApprovals[peerID] = ch
+	sm.pendingRequestNums[reqNum] = peerID
+	sm.pendingApprovalsMu.Unlock()
+
+	fmt.Printf("\nIncoming connection request (%d) from \"%s\" [%s]\n",
+		reqNum, colorize(92, nickname), colorize(96, shortID))
+	fmt.Printf("Type '%s' or '%s'\n\n",
+		colorize(93, fmt.Sprintf("/accept %d", reqNum)),
+		colorize(91, fmt.Sprintf("/reject %d", reqNum)))
+
+	NotifyConnectionRequest(peerID.String(), shortID, nickname)
+
+	var accepted bool
+	select {
+	case accepted = <-ch:
+	case <-time.After(30 * time.Second):
+		accepted = false
+		fmt.Printf("Connection request (%d) from \"%s\" timed out\n", reqNum, nickname)
+	}
+
+	if accepted {
+		_, _ = s.Write([]byte(ConnAcceptMsg + "\n"))
+		sm.AddStream(s)
+	} else {
+		_, _ = s.Write([]byte(ConnRejectMsg + "\n"))
+		fmt.Printf("Connection rejected from \"%s\" [%s]\n",
+			colorize(91, nickname), colorize(96, shortID))
+		_ = s.Close()
+	}
+
+	// Cleanup
+	sm.pendingApprovalsMu.Lock()
+	delete(sm.pendingApprovals, peerID)
+	delete(sm.pendingRequestNums, reqNum)
+	if len(sm.pendingRequestNums) == 0 {
+		sm.nextRequestNum = 0
+	}
+	sm.pendingApprovalsMu.Unlock()
+}
+
+func (sm *StreamManager) RespondToConnectionRequest(peerIDStr string, accepted bool) {
+	peerID, err := peerstore.Decode(peerIDStr)
+	if err != nil {
+		return
+	}
+	sm.pendingApprovalsMu.Lock()
+	ch, ok := sm.pendingApprovals[peerID]
+	sm.pendingApprovalsMu.Unlock()
+	if ok {
+		ch <- accepted
+	}
+}
+
+func (sm *StreamManager) RespondToConnectionRequestByNum(num int, accepted bool) {
+	sm.pendingApprovalsMu.Lock()
+	peerID, ok := sm.pendingRequestNums[num]
+	sm.pendingApprovalsMu.Unlock()
+	if !ok {
+		fmt.Printf("No pending request with number %d\n", num)
+		return
+	}
+
+	sm.pendingApprovalsMu.Lock()
+	ch, ok := sm.pendingApprovals[peerID]
+	sm.pendingApprovalsMu.Unlock()
+	if ok {
+		ch <- accepted
+	}
 }
 
 func (sm *StreamManager) readLoop(s network.Stream) {
@@ -124,13 +240,11 @@ func (sm *StreamManager) readLoop(s network.Stream) {
 		if err != nil {
 			if err == io.EOF {
 				nick, shortID := sm.displayName(peerID)
-
 				if nick != "" {
 					fmt.Printf("Connection closed by [%s] [%s]\n", colorize(91, nick), colorize(96, shortID))
 				} else {
 					fmt.Printf("Connection closed by [%s]\n", colorize(96, shortID))
 				}
-
 			} else {
 				fmt.Printf("Error reading from [%s]: %v\n", short, err)
 			}
@@ -138,15 +252,12 @@ func (sm *StreamManager) readLoop(s network.Stream) {
 			sm.mu.Lock()
 			delete(sm.streams, peerID)
 			delete(sm.sessions, peerID)
-
 			if sm.activeID == peerID {
 				sm.activeID = ""
 			}
 			sm.mu.Unlock()
 
-			// WEB: Notify web interface about peer disconnect
 			NotifyWebPeerUpdate()
-
 			_ = s.Close()
 			return
 		}
@@ -165,33 +276,24 @@ func (sm *StreamManager) readLoop(s network.Stream) {
 		if strings.HasPrefix(msg, NickPrefix) {
 			nick := strings.TrimSpace(strings.TrimPrefix(msg, NickPrefix))
 			if nick != "" {
-
 				sm.mu.Lock()
 				old := sm.peerNicks[peerID]
 				sm.peerNicks[peerID] = nick
 				sm.mu.Unlock()
 
-				// print only when nickname is first learned or changed
 				if old != nick {
 					shortID := peerID.String()
 					if len(shortID) > 8 {
 						shortID = shortID[len(shortID)-8:]
 					}
-
-					fmt.Printf(
-						"Peer [%s] is now known as [%s]\n",
-						colorize(96, shortID),
-						colorize(92, nick),
-					)
-
-					// WEB: Notify web interface about nickname update
+					fmt.Printf("Peer [%s] is now known as [%s]\n",
+						colorize(96, shortID), colorize(92, nick))
 					NotifyWebPeerUpdate()
 				}
 			}
 			continue
 		}
 
-		// Display nickname if known
 		sm.mu.RLock()
 		display := short
 		if n, ok := sm.peerNicks[peerID]; ok {
@@ -203,7 +305,6 @@ func (sm *StreamManager) readLoop(s network.Stream) {
 		coloredTime := colorize(93, time.Now().Format("15:04"))
 		fmt.Printf("[%s] [%s]: %s\n", coloredTime, coloredID, msg)
 
-		// WEB: Notify web interface about new message
 		NotifyWebMessage(peerID.String(), display, msg, false)
 	}
 }
@@ -213,20 +314,16 @@ func (sm *StreamManager) displayName(peerID peerstore.ID) (nick string, shortID 
 	if len(shortID) > 8 {
 		shortID = shortID[len(shortID)-8:]
 	}
-
 	sm.mu.RLock()
 	nick = sm.peerNicks[peerID]
 	sm.mu.RUnlock()
-
 	return nick, shortID
 }
 
 func (sm *StreamManager) HandleInput() {
 	scanner := bufio.NewScanner(os.Stdin)
-
 	for scanner.Scan() {
 		text := scanner.Text()
-
 		if len(text) > 0 && text[0] == '/' {
 			sm.handleCommand(text)
 			continue
@@ -269,9 +366,7 @@ func (sm *StreamManager) handleCommand(cmd string) {
 		return
 	}
 
-	command := parts[0]
-
-	switch command {
+	switch parts[0] {
 	case "/list":
 		sm.listPeers()
 	case "/switch":
@@ -288,10 +383,34 @@ func (sm *StreamManager) handleCommand(cmd string) {
 		sm.connectToPeer(parts[1])
 	case "/discover":
 		sm.discoverPeers()
+	case "/accept":
+		if len(parts) < 2 {
+			fmt.Println("Usage: '/accept <number>'")
+			return
+		}
+		num := 0
+		fmt.Sscanf(parts[1], "%d", &num)
+		if num == 0 {
+			fmt.Println("Invalid request number")
+			return
+		}
+		sm.RespondToConnectionRequestByNum(num, true)
+	case "/reject":
+		if len(parts) < 2 {
+			fmt.Println("Usage: '/reject <number>'")
+			return
+		}
+		num := 0
+		fmt.Sscanf(parts[1], "%d", &num)
+		if num == 0 {
+			fmt.Println("Invalid request number")
+			return
+		}
+		sm.RespondToConnectionRequestByNum(num, false)
 	case "/help":
 		sm.showHelp()
 	default:
-		fmt.Printf("Unknown command <%s>.\n'/help' for commands.\n", command)
+		fmt.Printf("Unknown command <%s>.\n'/help' for commands.\n", parts[0])
 	}
 }
 
@@ -304,23 +423,18 @@ func (sm *StreamManager) listPeers() {
 
 	fmt.Println("\nConnected Peers")
 	fmt.Println("-------------------")
-
 	for i, peerID := range peers {
 		activeMarker := " "
 		if peerID == sm.activeID {
 			activeMarker = ">"
 		}
-
 		nick, shortID := sm.displayName(peerID)
-
 		name := colorize(96, shortID)
-
 		if nick != "" {
 			name = fmt.Sprintf("%s [%s]", colorize(94, nick), colorize(93, shortID))
 		}
 		fmt.Printf("%s [%d] %s\n", activeMarker, i+1, name)
 	}
-
 	fmt.Println("-------------------")
 	fmt.Println("Use /switch <number> to change active peer")
 	fmt.Println()
@@ -328,7 +442,6 @@ func (sm *StreamManager) listPeers() {
 
 func (sm *StreamManager) switchPeer(arg string) {
 	peers := sm.getSortedPeers()
-
 	num := 0
 	_, err := fmt.Sscanf(arg, "%d", &num)
 	if err != nil || num < 1 || num > len(peers) {
@@ -341,26 +454,24 @@ func (sm *StreamManager) switchPeer(arg string) {
 	sm.mu.Unlock()
 
 	nick, shortID := sm.displayName(sm.activeID)
-
 	if nick != "" {
 		fmt.Printf("Switched to peer: [%s] [%s]\n", colorize(92, nick), colorize(96, shortID))
 	} else {
 		fmt.Printf("Switched to peer: [%s]\n", colorize(96, shortID))
 	}
-
 }
 
 func (sm *StreamManager) showHelp() {
 	fmt.Println()
 	fmt.Println(colorize(94, "Available Commands:"))
 	fmt.Println(colorize(94, "----------------------"))
-
-	fmt.Println(colorize(93, "/list") + "              - Show all connected peers")
-	fmt.Println(colorize(93, "/switch <number>") + "   - Switch active peer (use number from /list)")
-	fmt.Println(colorize(93, "/connect <addr>") + "    - Connect to a new peer")
-	fmt.Println(colorize(93, "/discover") + "          - Discover peers on the network")
-	fmt.Println(colorize(93, "/help") + "              - Show this help message")
-
+	fmt.Println(colorize(93, "/list") + "               - Show all connected peers")
+	fmt.Println(colorize(93, "/switch <number>") + "    - Switch active peer")
+	fmt.Println(colorize(93, "/connect <addr>") + "     - Connect to a new peer")
+	fmt.Println(colorize(93, "/discover") + "           - Discover peers on the network")
+	fmt.Println(colorize(93, "/accept <number>") + "    - Accept a connection request")
+	fmt.Println(colorize(93, "/reject <number>") + "    - Reject a connection request")
+	fmt.Println(colorize(93, "/help") + "               - Show this help message")
 	fmt.Println(colorize(94, "----------------------"))
 	fmt.Printf("Type any message (without %s) to send to active peer\n\n", colorize(93, "/"))
 }
@@ -400,15 +511,51 @@ func (sm *StreamManager) connectToPeer(address string) {
 		return
 	}
 
-	sm.AddStream(s)
-
-	short := peerInfo.ID.String()
-	if len(short) > 8 {
-		short = short[len(short)-8:]
+	// Send connection request with our nickname
+	_, err = s.Write([]byte(ConnReqPrefix + sm.localNick + "\n"))
+	if err != nil {
+		fmt.Printf("Failed to send connection request: %v\n", err)
+		_ = s.Close()
+		return
 	}
 
-	nick, shortID := sm.displayName(peerInfo.ID)
+	// Wait for accept/reject using goroutine timeout
+	type lineResult struct {
+		line string
+		err  error
+	}
+	resultCh := make(chan lineResult, 1)
+	go func() {
+		line, err := readLine(s)
+		resultCh <- lineResult{line, err}
+	}()
 
+	var response string
+	select {
+	case res := <-resultCh:
+		if res.err != nil {
+			fmt.Printf("No response from peer: %v\n", res.err)
+			_ = s.Close()
+			return
+		}
+		response = res.line
+	case <-time.After(35 * time.Second):
+		fmt.Printf("Connection request timed out\n")
+		_ = s.Close()
+		return
+	}
+
+	if response != ConnAcceptMsg {
+		fmt.Printf("Connection rejected by peer\n")
+		NotifyWebConnectionRejected(peerInfo.ID.String())
+		_ = s.Close()
+		return
+	}
+
+	fmt.Printf("Connection accepted! Establishing session...\n")
+	sm.AddStream(s)
+
+	nick, shortID := sm.displayName(peerInfo.ID)
 	if nick != "" {
 		fmt.Printf("Successfully connected to [%s] [%s]\n", colorize(92, nick), colorize(96, shortID))
 	} else {
@@ -416,16 +563,15 @@ func (sm *StreamManager) connectToPeer(address string) {
 	}
 }
 
-// discoverPeers queries the DHT and prints discovered peers.
 func (sm *StreamManager) discoverPeers() {
 	if sm.dht == nil {
 		fmt.Println(colorize(91, "DHT not initialized"))
 		return
 	}
 
-	fmt.Printf(colorize(94, "Discovering peers on the network... %s\n"), colorize(93, fmt.Sprintf("Threshold is '%d' seconds", DISCOVERY_TIME)))
+	fmt.Printf(colorize(94, "Discovering peers on the network... %s\n"),
+		colorize(93, fmt.Sprintf("Threshold is '%d' seconds", DISCOVERY_TIME)))
 
-	// Cap discovery time so the prompt stays responsive.
 	ctx, cancel := context.WithTimeout(sm.ctx, 30*time.Second)
 	defer cancel()
 
@@ -436,8 +582,6 @@ func (sm *StreamManager) discoverPeers() {
 	}
 
 	discoveredCount := 0
-
-	// Stop printing after a short window.
 	timeout := time.After(DISCOVERY_TIME * time.Second)
 
 	fmt.Println("\nDiscovered Peers:")
@@ -454,14 +598,9 @@ loop:
 			if !ok {
 				break loop
 			}
-
 			discoveredCount++
-
 			if len(peer.Addrs) > 0 {
-				address := fmt.Sprintf(
-					"%s/p2p/%s", peer.Addrs[0].String(), peer.PeerID.String(),
-				)
-
+				address := fmt.Sprintf("%s/p2p/%s", peer.Addrs[0].String(), peer.PeerID.String())
 				fmt.Printf("[%d] %s\n", discoveredCount, colorize(96, address))
 			}
 		}
@@ -471,7 +610,9 @@ loop:
 	if discoveredCount == 0 {
 		fmt.Println("No peers found. Make sure other instances are running and advertising.")
 	} else {
-		fmt.Printf("Found %s peers. Use '%s' to connect.\n", colorize(92, fmt.Sprintf("%d", discoveredCount)), colorize(93, "/connect <address>"))
+		fmt.Printf("Found %s peers. Use '%s' to connect.\n",
+			colorize(92, fmt.Sprintf("%d", discoveredCount)),
+			colorize(93, "/connect <address>"))
 	}
 	fmt.Println()
 }
@@ -481,19 +622,15 @@ func getIdentityPath(customName string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-
 	configDir := filepath.Join(home, ".p2pchat")
-
 	err = os.MkdirAll(configDir, 0700)
 	if err != nil {
 		return "", err
 	}
-
 	filename := "identity.key"
 	if customName != "" {
 		filename = fmt.Sprintf("identity_%s.key", customName)
 	}
-
 	return filepath.Join(configDir, filename), nil
 }
 
@@ -502,18 +639,15 @@ func loadOrGenerateKey(customName string) (crypto.PrivKey, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to get identity path: %w", err)
 	}
-
 	if _, err := os.Stat(keyPath); err == nil {
 		return loadKey(keyPath)
 	}
-
 	identityLabel := "default"
 	if customName != "" {
 		identityLabel = customName
 	}
-
-	coloredIdentityLabel := colorize(94, identityLabel)
-	fmt.Printf("No existing identity found for '%s'. Generating new identity...\n", coloredIdentityLabel)
+	fmt.Printf("No existing identity found for '%s'. Generating new identity...\n",
+		colorize(94, identityLabel))
 	return generateAndSaveKey(keyPath)
 }
 
@@ -522,17 +656,14 @@ func generateAndSaveKey(keyPath string) (crypto.PrivKey, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate key: %w", err)
 	}
-
 	keyBytes, err := crypto.MarshalPrivateKey(priv)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal key: %w", err)
 	}
-
 	err = os.WriteFile(keyPath, keyBytes, 0600)
 	if err != nil {
 		return nil, fmt.Errorf("failed to save key: %w", err)
 	}
-
 	fmt.Printf("New identity saved to: %s\n", colorize(96, keyPath))
 	return priv, nil
 }
@@ -542,43 +673,30 @@ func loadKey(keyPath string) (crypto.PrivKey, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to read key file: %w", err)
 	}
-
 	priv, err := crypto.UnmarshalPrivateKey(keyBytes)
 	if err != nil {
 		return nil, fmt.Errorf("failed to unmarshal key: %w", err)
 	}
-
 	fmt.Printf("Loaded existing identity from: %s\n", colorize(96, keyPath))
 	return priv, nil
 }
 
-// CreateNode sets up a libp2p host and registers the chat stream handler.
 func CreateNode(sm *StreamManager, identityName string) (host.Host, error) {
 	priv, err := loadOrGenerateKey(identityName)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load identity: %w", err)
 	}
 
-	listenAddr := "/ip4/0.0.0.0/tcp/0"
-
 	node, err := libp2p.New(
 		libp2p.Identity(priv),
-		libp2p.ListenAddrStrings(listenAddr),
+		libp2p.ListenAddrStrings("/ip4/0.0.0.0/tcp/0"),
 	)
 	if err != nil {
 		return nil, err
 	}
 
 	node.SetStreamHandler(ChatProtocolID, func(s network.Stream) {
-
-		coloredTime := colorize(93, time.Now().Format("15:04:05.000"))
-		shortID := s.Conn().RemotePeer().String()
-		if len(shortID) > 8 {
-			shortID = shortID[len(shortID)-8:]
-		}
-		fmt.Printf("Incoming connection from peer [%s] at [%s]\n", colorize(96, shortID), coloredTime)
-
-		sm.AddStream(s)
+		go sm.HandleIncomingStream(s)
 	})
 
 	return node, nil
@@ -589,24 +707,20 @@ func ConnectToPeer(node host.Host, address string, ctx context.Context) (peersto
 	if err != nil {
 		return peerstore.AddrInfo{}, fmt.Errorf("invalid multiaddr: %w", err)
 	}
-
 	peer, err := peerstore.AddrInfoFromP2pAddr(addr)
 	if err != nil {
 		return peerstore.AddrInfo{}, fmt.Errorf("invalid peer info: %w", err)
 	}
-
 	if err := node.Connect(ctx, *peer); err != nil {
 		return *peer, fmt.Errorf("connection failed: %w", err)
 	}
-
 	short := peer.ID.String()
 	if len(short) > 8 {
 		short = short[len(short)-8:]
 	}
-
-	coloredID := colorize(93, short)
-	coloredTime := colorize(93, time.Now().Format("15:04:05.000"))
-	fmt.Printf("Connected to '%s' at [%s]\n", coloredID, coloredTime)
+	fmt.Printf("Connected to '%s' at [%s]\n",
+		colorize(93, short),
+		colorize(93, time.Now().Format("15:04:05.000")))
 	return *peer, nil
 }
 
@@ -638,10 +752,8 @@ func main() {
 
 	sm.node = node
 
-	// WEB: Start web server
 	go StartWebServer(sm)
 
-	// Initialize discovery via the DHT.
 	fmt.Println(colorize(95, "Initializing DHT..."))
 	dhtService, err := discovery.NewDHTService(ctx, node)
 	if err != nil {
@@ -652,13 +764,11 @@ func main() {
 
 	sm.dht = dhtService
 
-	// Populate routing table before advertising.
 	if err := dhtService.Bootstrap(); err != nil {
 		fmt.Printf("Failed to bootstrap DHT: %v\n", err)
 		return
 	}
 
-	// Keep announcing presence while running.
 	go dhtService.AdvertiseContinuously(discovery.DefaultNamespace)
 
 	info := peerstore.AddrInfo{
@@ -675,33 +785,31 @@ func main() {
 		identityLabel = *identityName
 	}
 
-	coloredIdentityLabel := colorize(94, identityLabel)
-	fmt.Printf("\n======= %s =======\n", coloredIdentityLabel)
+	fmt.Printf("\n======= %s =======\n", colorize(94, identityLabel))
 	fmt.Println("Listening Peer Address:")
-	var coloredAddress = colorize(92, addrs[0].String())
-	fmt.Println(coloredAddress)
+	fmt.Println(colorize(92, addrs[0].String()))
 	fmt.Println()
 
 	args := flag.Args()
 	if len(args) > 0 {
-		addr := args[0]
-		peer, err := ConnectToPeer(node, addr, ctx)
+		peer, err := ConnectToPeer(node, args[0], ctx)
 		if err != nil {
 			panic(err)
 		}
-
 		s, err := node.NewStream(ctx, peer.ID, ChatProtocolID)
 		if err != nil {
 			fmt.Println("Failed to open chat stream:", err)
 			return
 		}
-
 		sm.AddStream(s)
 		fmt.Printf("Chat started. Type your messages or use %s for commands\n", colorize(93, "/help"))
 	}
 
 	go sm.HandleInput()
 
-	fmt.Printf("%s. Use '%s' to find peers or '%s' for commands.\n", colorize(92, "Node Ready"), colorize(93, "/discover"), colorize(93, "/help"))
+	fmt.Printf("%s. Use '%s' to find peers or '%s' for commands.\n",
+		colorize(92, "Node Ready"),
+		colorize(93, "/discover"),
+		colorize(93, "/help"))
 	waitForExitSignal()
 }

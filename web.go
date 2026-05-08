@@ -26,6 +26,7 @@ type WebClient struct {
 	sm         *StreamManager
 	clients    map[*websocket.Conn]bool
 	clientsMu  sync.RWMutex
+	writeMu    map[*websocket.Conn]*sync.Mutex
 	messages   []WebMsg
 	messagesMu sync.RWMutex
 }
@@ -50,23 +51,23 @@ func StartWebServer(sm *StreamManager) {
 	webClient = &WebClient{
 		sm:       sm,
 		clients:  make(map[*websocket.Conn]bool),
+		writeMu:  make(map[*websocket.Conn]*sync.Mutex),
 		messages: make([]WebMsg, 0),
 	}
 
-	listener, err := net.Listen("tcp", ":0")
+	listener, err := net.Listen("tcp", ":9090")
 	if err != nil {
 		fmt.Printf("Listener error: %v\n", err)
 		return
 	}
 
-	port := listener.Addr().(*net.TCPAddr).Port
 	webRoot := filepath.Join(".", "web")
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", handleWebSocket)
 	mux.Handle("/", http.FileServer(http.Dir(webRoot)))
 
-	fmt.Printf("\nWeb interface: %s\n\n", colorize(92, fmt.Sprintf("http://localhost:%d", port)))
+	fmt.Printf("\nWeb interface: %s\n\n", colorize(92, "http://localhost:9090"))
 
 	go http.Serve(listener, mux)
 }
@@ -79,6 +80,7 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 	webClient.clientsMu.Lock()
 	webClient.clients[conn] = true
+	webClient.writeMu[conn] = &sync.Mutex{}
 	webClient.clientsMu.Unlock()
 
 	webClient.sendInitialState(conn)
@@ -89,6 +91,7 @@ func (wc *WebClient) readWebSocket(conn *websocket.Conn) {
 	defer func() {
 		wc.clientsMu.Lock()
 		delete(wc.clients, conn)
+		delete(wc.writeMu, conn)
 		wc.clientsMu.Unlock()
 		conn.Close()
 	}()
@@ -118,10 +121,18 @@ func (wc *WebClient) handleWSMessage(msg WSMessage) {
 			Address string `json:"address"`
 		}
 		json.Unmarshal(msg.Payload, &p)
-		wc.sm.connectToPeer(p.Address)
+		go wc.sm.connectToPeer(p.Address)
 
 	case "discover_peers":
 		go wc.handleDiscoverPeers()
+
+	case "connection_response":
+		var p struct {
+			PeerID   string `json:"peerId"`
+			Accepted bool   `json:"accepted"`
+		}
+		json.Unmarshal(msg.Payload, &p)
+		wc.sm.RespondToConnectionRequest(p.PeerID, p.Accepted)
 	}
 }
 
@@ -291,6 +302,15 @@ func (wc *WebClient) sendToClient(conn *websocket.Conn, t string, payload interf
 		Type:    t,
 		Payload: p,
 	})
+
+	wc.clientsMu.RLock()
+	mu, ok := wc.writeMu[conn]
+	wc.clientsMu.RUnlock()
+	if !ok {
+		return
+	}
+	mu.Lock()
+	defer mu.Unlock()
 	conn.WriteMessage(websocket.TextMessage, data)
 }
 
@@ -303,5 +323,23 @@ func NotifyWebMessage(from, fromName, content string, isOwn bool) {
 func NotifyWebPeerUpdate() {
 	if webClient != nil {
 		webClient.notifyPeerUpdate()
+	}
+}
+
+func NotifyConnectionRequest(peerID, shortID, nickname string) {
+	if webClient != nil {
+		webClient.broadcast("connection_request", map[string]string{
+			"peerId":   peerID,
+			"shortId":  shortID,
+			"nickname": nickname,
+		})
+	}
+}
+
+func NotifyWebConnectionRejected(peerID string) {
+	if webClient != nil {
+		webClient.broadcast("connection_rejected", map[string]string{
+			"peerId": peerID,
+		})
 	}
 }
