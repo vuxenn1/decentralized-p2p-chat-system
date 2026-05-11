@@ -1,30 +1,82 @@
-# Go P2P Chat
-## About
-A decentralized Peer-to-Peer messaging application developed in Go that allows peers to communicate directly with End-to-End Encryption, discovering each other through a distributed network.
+# Secure and Serverless Decentralized P2P Communication System
+
+A fully decentralized peer-to-peer chat application built with Go and Flutter. No central server. No accounts. No data collection.
+
+**Erzurum Technical University — Computer Engineering**
+
+---
 
 ## Features
-- **Decentralized messaging**: Direct P2P communication without central servers.
-- **End-to-end encryption**: All messages encrypted before transmission.
-- **Peer discovery**: Automatic peer discovery through the network.
-- **Persistent identities**: Locally stored cryptographic identities.
 
-## Architecture
-- **Discovery**: DHT-based peer discovery for finding other nodes.
-- **Security**: End-to-End Encryption for all sent and received messages.
-- **P2P**: Direct encrypted communication streams between peers.
+- Fully decentralized — no central server or authority
+- End-to-end encrypted messaging (X25519 key exchange + ChaCha20-Poly1305)
+- Persistent cryptographic identity per user (Ed25519)
+- DHT-based peer discovery (Kademlia via libp2p)
+- Connection approval — incoming connections require explicit accept/reject
+- Encrypted local message history (HKDF key derivation + ChaCha20-Poly1305)
+- Trusted peer saving with custom nicknames
+- Android mobile app with embedded Go backend
+- Cross-platform CLI for desktop use
 
-## How to Use
-1. Run the application with a custom identity name:
-   ```bash
-   go run . --identity custom_nick
-   ````
-2. Start the program on another terminal or machine with a different identity:
-   ```bash
-   go run . --identity another_custom_nick
-   ```
-3. Each peer loads or creates a persistent cryptographic identity.
-4. Peers discover each other through the decentralized network.
-5. Use CLI commands such as `/discover`, `/connect`, `/help`, etc.
-6. Select a peer and start sending messages.
 ---
-All messages are exchanged directly between peers using encrypted peer-to-peer connections.
+
+## Tech Stack
+
+| Component | Technology |
+|-----------|-----------|
+| Language | Go 1.25 |
+| Networking | libp2p |
+| Peer Discovery | Kademlia DHT |
+| Encryption | X25519 + ChaCha20-Poly1305 |
+| Identity | Ed25519 |
+| Mobile UI | Flutter (Dart) |
+
+---
+
+## Run on Desktop (CLI)
+
+```bash
+go run . --identity yournick
+```
+
+**Available commands:**
+```
+/discover               - Find peers on the network
+/connect <addr>         - Connect to a peer by multiaddress
+/accept <number>        - Accept an incoming connection request
+/reject <number>        - Reject an incoming connection request
+/list                   - Show connected peers
+/switch <number>        - Switch active peer
+/peers                  - Show saved peers
+/save <peerid> <nick>   - Save a trusted peer with custom nickname
+/rename <number> <nick> - Rename a saved peer
+/remove <number>        - Remove a saved peer
+/help                   - Show all commands
+```
+
+---
+
+## Security Properties
+
+- **No plaintext transmission** — all messages encrypted before leaving the device
+- **Forward secrecy** — ephemeral session keys derived per connection
+- **Local storage encryption** — message history encrypted with HKDF-derived key unique to each conversation
+- **Identity verification** — peer IDs are derived from Ed25519 public keys, cannot be spoofed
+- **No central authority** — no server can read, store, or censor messages
+
+---
+
+## Limitations
+
+- Requires same WiFi network for direct phone-to-phone connections (no NAT traversal)
+- No message sync across multiple devices
+- No group chat
+- DHT discovery may show offline peers (stale records expire with TTL)
+
+---
+
+## Academic Notice
+
+This project was developed as a graduation engineering design project at Erzurum Technical University, Department of Computer Engineering, 2025–2026 academic year.
+
+All rights reserved. This codebase is shared for academic and demonstration purposes only.

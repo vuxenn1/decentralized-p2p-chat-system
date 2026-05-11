@@ -25,6 +25,7 @@ import (
 
 	"p2p-chat/discovery"
 	"p2p-chat/security"
+	"p2p-chat/storage"
 )
 
 const DISCOVERY_TIME = 5
@@ -67,6 +68,9 @@ type StreamManager struct {
 
 	localNick string
 	peerNicks map[peerstore.ID]string
+
+	historyStore *storage.HistoryStore
+	peerStore    *storage.PeerStore
 
 	pendingApprovals   map[peerstore.ID]chan bool
 	pendingApprovalsMu sync.Mutex
@@ -115,6 +119,7 @@ func (sm *StreamManager) AddStream(s network.Stream) {
 	sm.mu.Lock()
 	sm.streams[peerID] = s
 	sm.sessions[peerID] = session
+
 	if sm.activeID == "" {
 		sm.activeID = peerID
 	}
@@ -131,6 +136,16 @@ func (sm *StreamManager) AddStream(s network.Stream) {
 	}
 
 	NotifyWebPeerUpdate()
+
+	// Load and send history for this peer
+	if sm.historyStore != nil {
+		go func(pid peerstore.ID) {
+			msg, err := sm.historyStore.LoadHistory(pid.String())
+			if err == nil && len(msg) > 0 {
+				NotifyPeerHistory(pid.String(), msg)
+			}
+		}(peerID)
+	}
 }
 
 func (sm *StreamManager) HandleIncomingStream(s network.Stream) {
@@ -160,11 +175,8 @@ func (sm *StreamManager) HandleIncomingStream(s network.Stream) {
 	sm.pendingRequestNums[reqNum] = peerID
 	sm.pendingApprovalsMu.Unlock()
 
-	fmt.Printf("\nIncoming connection request (%d) from \"%s\" [%s]\n",
-		reqNum, colorize(92, nickname), colorize(96, shortID))
-	fmt.Printf("Type '%s' or '%s'\n\n",
-		colorize(93, fmt.Sprintf("/accept %d", reqNum)),
-		colorize(91, fmt.Sprintf("/reject %d", reqNum)))
+	fmt.Printf("\nIncoming connection request (%d) from \"%s\" [%s]\n", reqNum, colorize(92, nickname), colorize(96, shortID))
+	fmt.Printf("Type '%s' or '%s'\n\n", colorize(93, fmt.Sprintf("/accept %d", reqNum)), colorize(91, fmt.Sprintf("/reject %d", reqNum)))
 
 	NotifyConnectionRequest(peerID.String(), shortID, nickname)
 
@@ -181,8 +193,7 @@ func (sm *StreamManager) HandleIncomingStream(s network.Stream) {
 		sm.AddStream(s)
 	} else {
 		_, _ = s.Write([]byte(ConnRejectMsg + "\n"))
-		fmt.Printf("Connection rejected from \"%s\" [%s]\n",
-			colorize(91, nickname), colorize(96, shortID))
+		fmt.Printf("Connection rejected from \"%s\" [%s]\n", colorize(91, nickname), colorize(96, shortID))
 		_ = s.Close()
 	}
 
@@ -347,6 +358,16 @@ func (sm *StreamManager) HandleInput() {
 		}
 
 		_, err = stream.Write([]byte(enc + "\n"))
+		if err == nil && sm.historyStore != nil {
+			go sm.historyStore.SaveMessage(activeID.String(), storage.StoredMsg{
+				ID:        fmt.Sprintf("%d", time.Now().UnixNano()),
+				From:      sm.node.ID().String(),
+				FromName:  sm.localNick,
+				Content:   text,
+				Timestamp: time.Now(),
+				IsOwn:     true,
+			})
+		}
 		if err != nil {
 			fmt.Printf("Error, message sending to peer: %v\n", err)
 			sm.mu.Lock()
@@ -407,6 +428,42 @@ func (sm *StreamManager) handleCommand(cmd string) {
 			return
 		}
 		sm.RespondToConnectionRequestByNum(num, false)
+	case "/peers":
+		sm.listSavedPeers()
+	case "/save":
+		if len(parts) < 2 {
+			fmt.Println("Usage: '/save <fullpeerid> <customnick>'")
+			return
+		}
+		customNick := ""
+		if len(parts) >= 3 {
+			customNick = parts[2]
+		}
+		sm.savePeer(parts[1], customNick)
+	case "/rename":
+		if len(parts) < 3 {
+			fmt.Println("Usage: '/rename <number> <newnick>'")
+			return
+		}
+		num := 0
+		fmt.Sscanf(parts[1], "%d", &num)
+		if num == 0 {
+			fmt.Println("Invalid number")
+			return
+		}
+		sm.renameSavedPeer(num, parts[2])
+	case "/remove":
+		if len(parts) < 2 {
+			fmt.Println("Usage: '/remove <number>'")
+			return
+		}
+		num := 0
+		fmt.Sscanf(parts[1], "%d", &num)
+		if num == 0 {
+			fmt.Println("Invalid number")
+			return
+		}
+		sm.removeSavedPeer(num)
 	case "/help":
 		sm.showHelp()
 	default:
@@ -471,9 +528,106 @@ func (sm *StreamManager) showHelp() {
 	fmt.Println(colorize(93, "/discover") + "           - Discover peers on the network")
 	fmt.Println(colorize(93, "/accept <number>") + "    - Accept a connection request")
 	fmt.Println(colorize(93, "/reject <number>") + "    - Reject a connection request")
+	fmt.Println(colorize(93, "/peers") + "               - List saved peers")
+	fmt.Println(colorize(93, "/save <peerid> <nick>") + "  - Save a peer with custom nick")
+	fmt.Println(colorize(93, "/rename <number> <nick>") + " - Rename a saved peer")
+	fmt.Println(colorize(93, "/remove <number>") + "     - Remove a saved peer")
 	fmt.Println(colorize(93, "/help") + "               - Show this help message")
 	fmt.Println(colorize(94, "----------------------"))
 	fmt.Printf("Type any message (without %s) to send to active peer\n\n", colorize(93, "/"))
+}
+
+func (sm *StreamManager) listSavedPeers() {
+	if sm.peerStore == nil {
+		fmt.Println("Peer store not available")
+		return
+	}
+	peers, err := sm.peerStore.LoadPeers()
+	if err != nil || len(peers) == 0 {
+		fmt.Println("No saved peers.")
+		return
+	}
+	fmt.Println("\nSaved Peers:")
+	fmt.Println("-------------------")
+	for i, p := range peers {
+		short := p.PeerID
+		if len(short) > 8 {
+			short = short[len(short)-8:]
+		}
+		fmt.Printf("[%d] \"%s\" [%s]\n", i+1,
+			colorize(92, p.Nickname),
+			colorize(96, short))
+	}
+	fmt.Println("-------------------")
+	fmt.Println()
+}
+
+func (sm *StreamManager) savePeer(peerID string, customNick string) {
+	if sm.peerStore == nil {
+		fmt.Println("Peer store not available")
+		return
+	}
+	pid, err := peerstore.Decode(peerID)
+	if err != nil {
+		fmt.Printf("Invalid peer ID: %v\n", err)
+		return
+	}
+	_ = pid
+
+	nick := customNick
+	if nick == "" {
+		// fallback to known nickname
+		pid2, _ := peerstore.Decode(peerID)
+		sm.mu.RLock()
+		nick = sm.peerNicks[pid2]
+		sm.mu.RUnlock()
+		if nick == "" {
+			nick = peerID
+			if len(nick) > 8 {
+				nick = nick[len(nick)-8:]
+			}
+		}
+	}
+
+	if err := sm.peerStore.SavePeer(peerID, nick); err != nil {
+		fmt.Printf("Failed to save peer: %v\n", err)
+		return
+	}
+	fmt.Printf("Saved \"%s\" to trusted peers.\n", colorize(92, nick))
+	NotifyTrustedPeersUpdate(sm.peerStore)
+}
+
+func (sm *StreamManager) renameSavedPeer(num int, newNick string) {
+	if sm.peerStore == nil {
+		fmt.Println("Peer store not available")
+		return
+	}
+	peers, err := sm.peerStore.LoadPeers()
+	if err != nil || num < 1 || num > len(peers) {
+		fmt.Printf("No saved peer with number %d\n", num)
+		return
+	}
+	peer := peers[num-1]
+	if err := sm.peerStore.SavePeer(peer.PeerID, newNick); err != nil {
+		fmt.Printf("Failed to rename: %v\n", err)
+		return
+	}
+	fmt.Printf("Renamed to \"%s\".\n", colorize(92, newNick))
+	NotifyTrustedPeersUpdate(sm.peerStore)
+}
+
+func (sm *StreamManager) removeSavedPeer(num int) {
+	if sm.peerStore == nil {
+		fmt.Println("Peer store not available")
+		return
+	}
+	removed, err := sm.peerStore.RemovePeerByNum(num)
+	if err != nil {
+		fmt.Printf("%v\n", err)
+		return
+	}
+	fmt.Printf("Removed \"%s\" from saved peers.\n", colorize(91, removed.Nickname))
+	NotifyTrustedPeersUpdate(sm.peerStore)
 }
 
 func (sm *StreamManager) connectToPeer(address string) {
@@ -617,13 +771,18 @@ loop:
 	fmt.Println()
 }
 
-func getIdentityPath(customName string) (string, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", err
+func getIdentityPath(customName string, dataDir string) (string, error) {
+	var configDir string
+	if dataDir != "" {
+		configDir = dataDir
+	} else {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", err
+		}
+		configDir = filepath.Join(home, ".p2pchat")
 	}
-	configDir := filepath.Join(home, ".p2pchat")
-	err = os.MkdirAll(configDir, 0700)
+	err := os.MkdirAll(configDir, 0700)
 	if err != nil {
 		return "", err
 	}
@@ -634,8 +793,8 @@ func getIdentityPath(customName string) (string, error) {
 	return filepath.Join(configDir, filename), nil
 }
 
-func loadOrGenerateKey(customName string) (crypto.PrivKey, error) {
-	keyPath, err := getIdentityPath(customName)
+func loadOrGenerateKey(customName string, dataDir string) (crypto.PrivKey, error) {
+	keyPath, err := getIdentityPath(customName, dataDir)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get identity path: %w", err)
 	}
@@ -681,15 +840,20 @@ func loadKey(keyPath string) (crypto.PrivKey, error) {
 	return priv, nil
 }
 
-func CreateNode(sm *StreamManager, identityName string) (host.Host, error) {
-	priv, err := loadOrGenerateKey(identityName)
+func CreateNode(sm *StreamManager, identityName string, dataDir string, listenIP string) (host.Host, error) {
+	priv, err := loadOrGenerateKey(identityName, dataDir)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load identity: %w", err)
 	}
 
+	ip := "0.0.0.0"
+	if listenIP != "" {
+		ip = listenIP
+	}
+
 	node, err := libp2p.New(
 		libp2p.Identity(priv),
-		libp2p.ListenAddrStrings("/ip4/0.0.0.0/tcp/0"),
+		libp2p.ListenAddrStrings(fmt.Sprintf("/ip4/%s/tcp/0", ip)),
 	)
 	if err != nil {
 		return nil, err
@@ -733,7 +897,17 @@ func waitForExitSignal() {
 
 func main() {
 	identityName := flag.String("identity", "", "Identity name for testing")
+	dataDir := flag.String("datadir", "", "Data directory for storage (used on Android)")
+	listenIP := flag.String("listenip", "", "Specific IP to listen on (used on Android for LAN)")
 	flag.Parse()
+
+	resolvedDataDir := *dataDir
+	if resolvedDataDir == "" {
+		home, err := os.UserHomeDir()
+		if err == nil {
+			resolvedDataDir = filepath.Join(home, ".p2pchat")
+		}
+	}
 
 	ctx := context.Background()
 
@@ -743,7 +917,7 @@ func main() {
 		sm.localNick = "anon"
 	}
 
-	node, err := CreateNode(sm, *identityName)
+	node, err := CreateNode(sm, *identityName, *dataDir, *listenIP)
 	if err != nil {
 		fmt.Printf("Failed to create node: %v\n", err)
 		return
@@ -751,6 +925,26 @@ func main() {
 	defer node.Close()
 
 	sm.node = node
+
+	privKeyBytes, pkErr := node.Peerstore().PrivKey(node.ID()).Raw()
+	if pkErr == nil {
+		dir := resolvedDataDir
+		if dir == "" {
+			home, _ := os.UserHomeDir()
+			dir = filepath.Join(home, ".p2pchat")
+		}
+
+		ps, psErr := storage.NewPeerStore(dir)
+		if psErr == nil {
+			sm.peerStore = ps
+		}
+
+		hs, hsErr := storage.NewHistoryStore(dir, privKeyBytes)
+		if hsErr == nil {
+			sm.historyStore = hs
+			fmt.Println(colorize(95, "Message history storage initialized."))
+		}
+	}
 
 	go StartWebServer(sm)
 
@@ -775,6 +969,7 @@ func main() {
 		ID:    node.ID(),
 		Addrs: node.Addrs(),
 	}
+
 	addrs, err := peerstore.AddrInfoToP2pAddrs(&info)
 	if err != nil {
 		panic(err)

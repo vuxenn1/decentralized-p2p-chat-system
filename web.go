@@ -14,6 +14,7 @@ import (
 	multiaddr "github.com/multiformats/go-multiaddr"
 
 	"p2p-chat/discovery"
+	"p2p-chat/storage"
 )
 
 var wsUpgrader = websocket.Upgrader{
@@ -23,12 +24,14 @@ var wsUpgrader = websocket.Upgrader{
 }
 
 type WebClient struct {
-	sm         *StreamManager
-	clients    map[*websocket.Conn]bool
-	clientsMu  sync.RWMutex
-	writeMu    map[*websocket.Conn]*sync.Mutex
-	messages   []WebMsg
-	messagesMu sync.RWMutex
+	sm              *StreamManager
+	clients         map[*websocket.Conn]bool
+	clientsMu       sync.RWMutex
+	writeMu         map[*websocket.Conn]*sync.Mutex
+	messages        []WebMsg
+	messagesMu      sync.RWMutex
+	pendingRequests []map[string]string
+	pendingReqMu    sync.Mutex
 }
 
 type WebMsg struct {
@@ -49,10 +52,11 @@ var webClient *WebClient
 
 func StartWebServer(sm *StreamManager) {
 	webClient = &WebClient{
-		sm:       sm,
-		clients:  make(map[*websocket.Conn]bool),
-		writeMu:  make(map[*websocket.Conn]*sync.Mutex),
-		messages: make([]WebMsg, 0),
+		sm:              sm,
+		clients:         make(map[*websocket.Conn]bool),
+		writeMu:         make(map[*websocket.Conn]*sync.Mutex),
+		messages:        make([]WebMsg, 0),
+		pendingRequests: make([]map[string]string, 0),
 	}
 
 	listener, err := net.Listen("tcp", ":9090")
@@ -132,7 +136,29 @@ func (wc *WebClient) handleWSMessage(msg WSMessage) {
 			Accepted bool   `json:"accepted"`
 		}
 		json.Unmarshal(msg.Payload, &p)
+		RemovePendingRequest(p.PeerID)
 		wc.sm.RespondToConnectionRequest(p.PeerID, p.Accepted)
+
+	case "save_peer":
+		var p struct {
+			PeerID   string `json:"peerId"`
+			Nickname string `json:"nickname"`
+		}
+		json.Unmarshal(msg.Payload, &p)
+		if wc.sm.peerStore != nil && p.PeerID != "" {
+			wc.sm.peerStore.SavePeer(p.PeerID, p.Nickname)
+			NotifyTrustedPeersUpdate(wc.sm.peerStore)
+		}
+
+	case "remove_peer":
+		var p struct {
+			PeerID string `json:"peerId"`
+		}
+		json.Unmarshal(msg.Payload, &p)
+		if wc.sm.peerStore != nil && p.PeerID != "" {
+			wc.sm.peerStore.RemovePeerByID(p.PeerID)
+			NotifyTrustedPeersUpdate(wc.sm.peerStore)
+		}
 	}
 }
 
@@ -204,7 +230,35 @@ func (wc *WebClient) sendInitialState(conn *websocket.Conn) {
 	}
 	wc.sendToClient(conn, "node_info", info)
 	wc.sendToClient(conn, "peers_list", wc.getPeersList())
-	wc.sendToClient(conn, "message_history", wc.messages)
+
+	// Send any pending connection requests
+	wc.pendingReqMu.Lock()
+	pending := make([]map[string]string, len(wc.pendingRequests))
+	copy(pending, wc.pendingRequests)
+	wc.pendingReqMu.Unlock()
+	for _, req := range pending {
+		wc.sendToClient(conn, "connection_request", req)
+	}
+
+	// Send all stored peer histories
+	if wc.sm.historyStore != nil {
+		go func() {
+			all, err := wc.sm.historyStore.LoadAllHistories()
+			if err != nil {
+				return
+			}
+			for peerID, msgs := range all {
+				if len(msgs) > 0 {
+					NotifyPeerHistory(peerID, msgs)
+				}
+			}
+		}()
+	}
+
+	// Send trusted peers
+	if wc.sm.peerStore != nil {
+		NotifyTrustedPeersUpdate(wc.sm.peerStore)
+	}
 }
 
 func (wc *WebClient) getPeersList() []map[string]interface{} {
@@ -259,10 +313,10 @@ func (wc *WebClient) sendMessageToPeer(peerIDStr, content string) {
 	}
 
 	stream.Write([]byte(enc + "\n"))
-	wc.addMessage(wc.sm.node.ID().String(), wc.sm.localNick, content, true)
+	wc.addMessage(wc.sm.node.ID().String(), wc.sm.localNick, content, true, peerIDStr)
 }
 
-func (wc *WebClient) addMessage(from, fromName, content string, isOwn bool) {
+func (wc *WebClient) addMessage(from, fromName, content string, isOwn bool, conversationPeerID string) {
 	msg := WebMsg{
 		ID:        fmt.Sprintf("%d", time.Now().UnixNano()),
 		From:      from,
@@ -275,6 +329,18 @@ func (wc *WebClient) addMessage(from, fromName, content string, isOwn bool) {
 	wc.messagesMu.Lock()
 	wc.messages = append(wc.messages, msg)
 	wc.messagesMu.Unlock()
+
+	// Save to encrypted history
+	if wc.sm.historyStore != nil && conversationPeerID != "" {
+		go wc.sm.historyStore.SaveMessage(conversationPeerID, storage.StoredMsg{
+			ID:        msg.ID,
+			From:      msg.From,
+			FromName:  msg.FromName,
+			Content:   msg.Content,
+			Timestamp: msg.Timestamp,
+			IsOwn:     msg.IsOwn,
+		})
+	}
 
 	wc.broadcast("new_message", msg)
 }
@@ -316,7 +382,7 @@ func (wc *WebClient) sendToClient(conn *websocket.Conn, t string, payload interf
 
 func NotifyWebMessage(from, fromName, content string, isOwn bool) {
 	if webClient != nil {
-		webClient.addMessage(from, fromName, content, isOwn)
+		webClient.addMessage(from, fromName, content, isOwn, from)
 	}
 }
 
@@ -328,11 +394,15 @@ func NotifyWebPeerUpdate() {
 
 func NotifyConnectionRequest(peerID, shortID, nickname string) {
 	if webClient != nil {
-		webClient.broadcast("connection_request", map[string]string{
+		req := map[string]string{
 			"peerId":   peerID,
 			"shortId":  shortID,
 			"nickname": nickname,
-		})
+		}
+		webClient.pendingReqMu.Lock()
+		webClient.pendingRequests = append(webClient.pendingRequests, req)
+		webClient.pendingReqMu.Unlock()
+		webClient.broadcast("connection_request", req)
 	}
 }
 
@@ -342,4 +412,46 @@ func NotifyWebConnectionRejected(peerID string) {
 			"peerId": peerID,
 		})
 	}
+}
+
+func RemovePendingRequest(peerID string) {
+	if webClient == nil {
+		return
+	}
+	webClient.pendingReqMu.Lock()
+	defer webClient.pendingReqMu.Unlock()
+	filtered := make([]map[string]string, 0)
+	for _, r := range webClient.pendingRequests {
+		if r["peerId"] != peerID {
+			filtered = append(filtered, r)
+		}
+	}
+	webClient.pendingRequests = filtered
+}
+
+func NotifyPeerHistory(peerID string, msgs []storage.StoredMsg) {
+	if webClient == nil {
+		return
+	}
+
+	type historyPayload struct {
+		PeerID   string              `json:"peerId"`
+		Messages []storage.StoredMsg `json:"messages"`
+	}
+
+	webClient.broadcast("peer_history", historyPayload{
+		PeerID:   peerID,
+		Messages: msgs,
+	})
+}
+
+func NotifyTrustedPeersUpdate(ps *storage.PeerStore) {
+	if webClient == nil || ps == nil {
+		return
+	}
+	peers, err := ps.LoadPeers()
+	if err != nil {
+		return
+	}
+	webClient.broadcast("trusted_peers_list", peers)
 }

@@ -22,8 +22,8 @@ import (
 // Each message increments the nonce to ensure unique encryption per message.
 //
 // SECURITY LIMITATION: This implementation does not verify received nonces,
-// making it vulnerable to replay attacks. A production system should track
-// received nonces to detect and reject replayed messages.
+// making it vulnerable to replay attacks.
+// A production system should track received nonces to detect and reject replayed messages.
 type Session struct {
 	aead     cipher.AEAD // ChaCha20-Poly1305 cipher (encrypts + authenticates)
 	nonceCtr uint64      // Counter to generate unique nonces (prevents reuse)

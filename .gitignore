@@ -1,0 +1,36 @@
+# Compiled binaries
+*.exe
+*.so
+*.dll
+*.dylib
+p2p-chat
+
+# Build artifacts
+/build/
+
+# User data - never commit identity keys or message history
+.p2pchat/
+*.key
+
+# Android build wrappers (contain machine-specific paths)
+clang_wrapper.py
+clang_wrapper_arm64.py
+clang_wrapper.cmd
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Go test cache
+/tmp/
+
+# Go workspace
+go.work
+go.work.sum
