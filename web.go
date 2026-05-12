@@ -138,7 +138,17 @@ func (wc *WebClient) handleWSMessage(msg WSMessage) {
 		json.Unmarshal(msg.Payload, &p)
 		RemovePendingRequest(p.PeerID)
 		wc.sm.RespondToConnectionRequest(p.PeerID, p.Accepted)
+	case "reconnect_peer":
+		var p struct {
+			PeerID string `json:"peerId"`
+		}
+		json.Unmarshal(msg.Payload, &p)
+		if p.PeerID != "" {
+			go wc.sm.ReconnectPeer(p.PeerID)
+		}
 
+	case "disconnect_peer":
+		wc.sm.disconnectActivePeer()
 	case "save_peer":
 		var p struct {
 			PeerID   string `json:"peerId"`
@@ -158,6 +168,15 @@ func (wc *WebClient) handleWSMessage(msg WSMessage) {
 		if wc.sm.peerStore != nil && p.PeerID != "" {
 			wc.sm.peerStore.RemovePeerByID(p.PeerID)
 			NotifyTrustedPeersUpdate(wc.sm.peerStore)
+		}
+
+	case "clear_history":
+		var p struct {
+			PeerID string `json:"peerId"`
+		}
+		json.Unmarshal(msg.Payload, &p)
+		if wc.sm.historyStore != nil && p.PeerID != "" {
+			wc.sm.historyStore.ClearHistory(p.PeerID)
 		}
 	}
 }
@@ -454,4 +473,24 @@ func NotifyTrustedPeersUpdate(ps *storage.PeerStore) {
 		return
 	}
 	webClient.broadcast("trusted_peers_list", peers)
+}
+
+func NotifyPeerDisconnected(peerID, nickname, shortID string) {
+	if webClient != nil {
+		webClient.broadcast("peer_disconnected", map[string]string{
+			"peerId":   peerID,
+			"nickname": nickname,
+			"shortId":  shortID,
+		})
+	}
+}
+
+func NotifyReconnectStatus(peerID, status, message string) {
+	if webClient != nil {
+		webClient.broadcast("reconnect_status", map[string]string{
+			"peerId":  peerID,
+			"status":  status,
+			"message": message,
+		})
+	}
 }

@@ -300,6 +300,11 @@ func (sm *StreamManager) readLoop(s network.Stream) {
 					fmt.Printf("Peer [%s] is now known as [%s]\n",
 						colorize(96, shortID), colorize(92, nick))
 					NotifyWebPeerUpdate()
+
+					sm.mu.RLock()
+					nick := sm.peerNicks[peerID]
+					sm.mu.RUnlock()
+					NotifyPeerDisconnected(peerID.String(), nick, short)
 				}
 			}
 			continue
@@ -402,6 +407,8 @@ func (sm *StreamManager) handleCommand(cmd string) {
 			return
 		}
 		sm.connectToPeer(parts[1])
+	case "/disconnect":
+		sm.disconnectActivePeer()
 	case "/discover":
 		sm.discoverPeers()
 	case "/accept":
@@ -525,6 +532,7 @@ func (sm *StreamManager) showHelp() {
 	fmt.Println(colorize(93, "/list") + "               - Show all connected peers")
 	fmt.Println(colorize(93, "/switch <number>") + "    - Switch active peer")
 	fmt.Println(colorize(93, "/connect <addr>") + "     - Connect to a new peer")
+	fmt.Println(colorize(93, "/disconnect") + "          - Disconnect from active peer")
 	fmt.Println(colorize(93, "/discover") + "           - Discover peers on the network")
 	fmt.Println(colorize(93, "/accept <number>") + "    - Accept a connection request")
 	fmt.Println(colorize(93, "/reject <number>") + "    - Reject a connection request")
@@ -535,6 +543,65 @@ func (sm *StreamManager) showHelp() {
 	fmt.Println(colorize(93, "/help") + "               - Show this help message")
 	fmt.Println(colorize(94, "----------------------"))
 	fmt.Printf("Type any message (without %s) to send to active peer\n\n", colorize(93, "/"))
+}
+
+func (sm *StreamManager) disconnectActivePeer() {
+	sm.mu.RLock()
+	activeID := sm.activeID
+	stream, exists := sm.streams[activeID]
+	sm.mu.RUnlock()
+
+	if !exists || activeID == "" {
+		fmt.Println("No active peer to disconnect")
+		return
+	}
+
+	nick, shortID := sm.displayName(activeID)
+	_ = stream.Close()
+
+	if nick != "" {
+		fmt.Printf("Disconnected from [%s] [%s]\n", colorize(91, nick), colorize(96, shortID))
+	} else {
+		fmt.Printf("Disconnected from [%s]\n", colorize(96, shortID))
+	}
+}
+
+func (sm *StreamManager) ReconnectPeer(peerIDStr string) {
+	if sm.dht == nil {
+		NotifyReconnectStatus(peerIDStr, "failed", "DHT başlatılmamış")
+		return
+	}
+
+	peerID, err := peerstore.Decode(peerIDStr)
+	if err != nil {
+		NotifyReconnectStatus(peerIDStr, "failed", "Geçersiz peer ID")
+		return
+	}
+
+	sm.mu.RLock()
+	_, alreadyConnected := sm.streams[peerID]
+	sm.mu.RUnlock()
+	if alreadyConnected {
+		NotifyReconnectStatus(peerIDStr, "connected", "Zaten bağlı")
+		return
+	}
+
+	NotifyReconnectStatus(peerIDStr, "searching", "Peer aranıyor...")
+
+	peerInfo, err := sm.dht.FindPeer(peerID)
+	if err != nil || len(peerInfo.Addrs) == 0 {
+		NotifyReconnectStatus(peerIDStr, "failed", "Peer ağda bulunamadı")
+		return
+	}
+
+	addrs, err := peerstore.AddrInfoToP2pAddrs(&peerInfo)
+	if err != nil || len(addrs) == 0 {
+		NotifyReconnectStatus(peerIDStr, "failed", "Peer adresi alınamadı")
+		return
+	}
+
+	NotifyReconnectStatus(peerIDStr, "connecting", "Bağlanılıyor...")
+	sm.connectToPeer(addrs[0].String())
 }
 
 func (sm *StreamManager) listSavedPeers() {

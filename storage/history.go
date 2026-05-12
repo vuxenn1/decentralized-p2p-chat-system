@@ -182,3 +182,14 @@ func (h *HistoryStore) writeFile(peerID string, msgs []StoredMsg) error {
 	out := aead.Seal(nonce, nonce, plain, nil)
 	return os.WriteFile(h.filePath(peerID), out, 0600)
 }
+
+// ClearHistory deletes the history file for a peer.
+func (h *HistoryStore) ClearHistory(peerID string) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	err := os.Remove(h.filePath(peerID))
+	if os.IsNotExist(err) {
+		return nil
+	}
+	return err
+}
