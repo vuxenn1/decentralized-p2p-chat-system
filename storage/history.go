@@ -153,6 +153,7 @@ func (h *HistoryStore) readFile(peerID string) ([]StoredMsg, error) {
 	if err := json.Unmarshal(plain, &msgs); err != nil {
 		return nil, fmt.Errorf("parse json: %w", err)
 	}
+
 	return msgs, nil
 }
 
