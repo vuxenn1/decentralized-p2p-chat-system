@@ -11,6 +11,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -317,9 +318,20 @@ func (sm *StreamManager) readLoop(s network.Stream) {
 		}
 		sm.mu.RUnlock()
 
-		coloredID := colorize(96, display)
-		coloredTime := colorize(93, time.Now().Format("15:04"))
-		fmt.Printf("[%s] [%s]: %s\n", coloredTime, coloredID, msg)
+		if strings.HasPrefix(msg, "LATENCY_TEST:") {
+			parts := strings.SplitN(msg, ":", 3)
+			if len(parts) == 3 {
+				sentMs, err := strconv.ParseInt(parts[1], 10, 64)
+				if err == nil {
+					latency := time.Now().UnixMilli() - sentMs
+					fmt.Printf("LATENCY_RESULT:%d\n", latency)
+				}
+			}
+		} else {
+			coloredID := colorize(96, display)
+			coloredTime := colorize(93, time.Now().Format("15:04"))
+			fmt.Printf("[%s] [%s]: %s\n", coloredTime, coloredID, msg)
+		}
 
 		NotifyWebMessage(peerID.String(), display, msg, false)
 	}
@@ -471,11 +483,59 @@ func (sm *StreamManager) handleCommand(cmd string) {
 			return
 		}
 		sm.removeSavedPeer(num)
+	case "/latencytest":
+		if len(parts) < 2 {
+			fmt.Println("Usage: '/latencytest <small|medium|large>'")
+			return
+		}
+		go sm.runLatencyTest(parts[1])
 	case "/help":
 		sm.showHelp()
 	default:
 		fmt.Printf("Unknown command <%s>.\n'/help' for commands.\n", parts[0])
 	}
+}
+
+func (sm *StreamManager) runLatencyTest(size string) {
+	sm.mu.RLock()
+	activeID := sm.activeID
+	stream, exists := sm.streams[activeID]
+	session := sm.sessions[activeID]
+	sm.mu.RUnlock()
+
+	if !exists || activeID == "" {
+		fmt.Println("No active peer for latency test")
+		return
+	}
+
+	msgBody := ""
+	msgSize := 10
+	switch size {
+	case "small":
+		msgBody = strings.Repeat("a", msgSize)
+	case "medium":
+		msgBody = strings.Repeat("a", msgSize*10)
+	case "large":
+		msgBody = strings.Repeat("a", msgSize*100)
+	default:
+		fmt.Println("Unknown size. Use: small, medium, large")
+		return
+	}
+
+	fmt.Printf("Starting latency test [%s] — 100 messages...\n", size)
+
+	for i := 1; i <= 100; i++ {
+		ts := time.Now().UnixMilli()
+		msg := fmt.Sprintf("LATENCY_TEST:%d:%s", ts, msgBody)
+		enc, err := session.Encrypt([]byte(msg))
+		if err != nil {
+			continue
+		}
+		stream.Write([]byte(enc + "\n"))
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	fmt.Printf("Latency test [%s] complete.\n", size)
 }
 
 func (sm *StreamManager) listPeers() {
