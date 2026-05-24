@@ -318,13 +318,24 @@ func (sm *StreamManager) readLoop(s network.Stream) {
 		}
 		sm.mu.RUnlock()
 
-		if strings.HasPrefix(msg, "LATENCY_TEST:") {
+		if strings.HasPrefix(msg, "LATENCY_PING:") {
+			// Receiver side: echo back immediately
 			parts := strings.SplitN(msg, ":", 3)
-			if len(parts) == 3 {
+			if len(parts) >= 2 {
+				pong := fmt.Sprintf("LATENCY_PONG:%s", parts[1])
+				enc, err := session.Encrypt([]byte(pong))
+				if err == nil {
+					s.Write([]byte(enc + "\n"))
+				}
+			}
+		} else if strings.HasPrefix(msg, "LATENCY_PONG:") {
+			// Sender side: compute RTT/2
+			parts := strings.SplitN(msg, ":", 2)
+			if len(parts) == 2 {
 				sentMs, err := strconv.ParseInt(parts[1], 10, 64)
 				if err == nil {
-					latency := time.Now().UnixMilli() - sentMs
-					fmt.Printf("LATENCY_RESULT:%d\n", latency)
+					rtt := time.Now().UnixMilli() - sentMs
+					fmt.Printf("LATENCY_RESULT:%d\n", rtt/2)
 				}
 			}
 		} else {
@@ -526,7 +537,7 @@ func (sm *StreamManager) runLatencyTest(size string) {
 
 	for i := 1; i <= 100; i++ {
 		ts := time.Now().UnixMilli()
-		msg := fmt.Sprintf("LATENCY_TEST:%d:%s", ts, msgBody)
+		msg := fmt.Sprintf("LATENCY_PING:%d:%s", ts, msgBody)
 		enc, err := session.Encrypt([]byte(msg))
 		if err != nil {
 			continue
