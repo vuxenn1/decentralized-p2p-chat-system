@@ -11,8 +11,10 @@ import (
 	"os/signal"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -34,6 +36,8 @@ const NickPrefix = "__NICKNAME__:"
 const ConnReqPrefix = "__CONNREQ__:"
 const ConnAcceptMsg = "__ACCEPT__"
 const ConnRejectMsg = "__REJECT__"
+
+var concurrentTestReceived int64
 
 func colorize(color int, text string) string {
 	return fmt.Sprintf("\x1b[%dm%s\x1b[0m", color, text)
@@ -317,9 +321,36 @@ func (sm *StreamManager) readLoop(s network.Stream) {
 		}
 		sm.mu.RUnlock()
 
-		coloredID := colorize(96, display)
-		coloredTime := colorize(93, time.Now().Format("15:04"))
-		fmt.Printf("[%s] [%s]: %s\n", coloredTime, coloredID, msg)
+		// Message Latency Tests
+		if strings.HasPrefix(msg, "LATENCY_PING:") {
+			// Receiver side: echo back immediately
+			parts := strings.SplitN(msg, ":", 3)
+			if len(parts) >= 2 {
+				pong := fmt.Sprintf("LATENCY_PONG:%s", parts[1])
+				enc, err := session.Encrypt([]byte(pong))
+				if err == nil {
+					s.Write([]byte(enc + "\n"))
+				}
+			}
+		} else if strings.HasPrefix(msg, "LATENCY_PONG:") {
+			// Sender side: compute RTT/2
+			parts := strings.SplitN(msg, ":", 2)
+			if len(parts) == 2 {
+				sentMs, err := strconv.ParseInt(parts[1], 10, 64)
+				if err == nil {
+					rtt := time.Now().UnixMilli() - sentMs
+					fmt.Printf("LATENCY_RESULT:%d\n", rtt/2)
+				}
+			}
+			// Concurrent Connection Tests
+		} else if strings.HasPrefix(msg, "CONCURRENT_TEST:") {
+			atomic.AddInt64(&concurrentTestReceived, 1)
+			fmt.Printf("CONCURRENT_RECEIVED:%d\n", atomic.LoadInt64(&concurrentTestReceived))
+		} else {
+			coloredID := colorize(96, display)
+			coloredTime := colorize(93, time.Now().Format("15:04"))
+			fmt.Printf("[%s] [%s]: %s\n", coloredTime, coloredID, msg)
+		}
 
 		NotifyWebMessage(peerID.String(), display, msg, false)
 	}
@@ -471,11 +502,106 @@ func (sm *StreamManager) handleCommand(cmd string) {
 			return
 		}
 		sm.removeSavedPeer(num)
+	case "/latencytest":
+		if len(parts) < 2 {
+			fmt.Println("Usage: '/latencytest <small|medium|large>'")
+			return
+		}
+		go sm.runLatencyTest(parts[1])
+	case "/concurrenttest":
+		go sm.runConcurrentTest()
 	case "/help":
 		sm.showHelp()
 	default:
 		fmt.Printf("Unknown command <%s>.\n'/help' for commands.\n", parts[0])
 	}
+}
+
+func (sm *StreamManager) runLatencyTest(size string) {
+	sm.mu.RLock()
+	activeID := sm.activeID
+	stream, exists := sm.streams[activeID]
+	session := sm.sessions[activeID]
+	sm.mu.RUnlock()
+
+	if !exists || activeID == "" {
+		fmt.Println("No active peer for latency test")
+		return
+	}
+
+	msgBody := ""
+	msgSize := 10
+	switch size {
+	case "small":
+		msgBody = strings.Repeat("a", msgSize)
+	case "medium":
+		msgBody = strings.Repeat("a", msgSize*10)
+	case "large":
+		msgBody = strings.Repeat("a", msgSize*100)
+	default:
+		fmt.Println("Unknown size. Use: small, medium, large")
+		return
+	}
+
+	fmt.Printf("Starting latency test [%s] — 100 messages...\n", size)
+
+	for i := 1; i <= 100; i++ {
+		ts := time.Now().UnixMilli()
+		msg := fmt.Sprintf("LATENCY_PING:%d:%s", ts, msgBody)
+		enc, err := session.Encrypt([]byte(msg))
+		if err != nil {
+			continue
+		}
+		stream.Write([]byte(enc + "\n"))
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	fmt.Printf("Latency test [%s] complete.\n", size)
+}
+
+func (sm *StreamManager) runConcurrentTest() {
+	sm.mu.RLock()
+	peers := make([]peerstore.ID, 0)
+	for pid := range sm.streams {
+		peers = append(peers, pid)
+	}
+	sm.mu.RUnlock()
+
+	if len(peers) == 0 {
+		fmt.Println("No connected peers for concurrent test")
+		return
+	}
+
+	fmt.Printf("Starting concurrent test — %d peers, 20 messages each...\n", len(peers))
+
+	var wg sync.WaitGroup
+	for _, pid := range peers {
+		wg.Add(1)
+		go func(peerID peerstore.ID) {
+			defer wg.Done()
+
+			sm.mu.RLock()
+			stream := sm.streams[peerID]
+			session := sm.sessions[peerID]
+			sm.mu.RUnlock()
+
+			nick, _ := sm.displayName(peerID)
+
+			for i := 1; i <= 20; i++ {
+				msg := fmt.Sprintf("CONCURRENT_TEST:%s:%d", nick, i)
+				enc, err := session.Encrypt([]byte(msg))
+				if err != nil {
+					continue
+				}
+				stream.Write([]byte(enc + "\n"))
+				time.Sleep(10 * time.Millisecond)
+			}
+		}(pid)
+	}
+
+	wg.Wait()
+	fmt.Printf("\nConcurrent test complete. Sent %d total messages.\n",
+		len(peers)*20)
 }
 
 func (sm *StreamManager) listPeers() {
@@ -805,6 +931,8 @@ func (sm *StreamManager) discoverPeers() {
 	discoveredCount := 0
 	timeout := time.After(DISCOVERY_TIME * time.Second)
 
+	discoverStart := time.Now()
+
 	fmt.Println("\nDiscovered Peers:")
 	fmt.Println("-------------------")
 
@@ -822,7 +950,11 @@ loop:
 			discoveredCount++
 			if len(peer.Addrs) > 0 {
 				address := fmt.Sprintf("%s/p2p/%s", peer.Addrs[0].String(), peer.PeerID.String())
-				fmt.Printf("[%d] %s\n", discoveredCount, colorize(96, address))
+				elapsed := time.Since(discoverStart)
+				fmt.Printf("[%d] %s - in %dms\n",
+					discoveredCount,
+					colorize(96, address),
+					elapsed.Milliseconds())
 			}
 		}
 	}
