@@ -692,6 +692,27 @@ func (sm *StreamManager) disconnectActivePeer() {
 	}
 }
 
+func (sm *StreamManager) disconnectSpecificPeer(peerIDStr string) {
+	peerID, err := peerstore.Decode(peerIDStr)
+	if err != nil {
+		return
+	}
+	sm.mu.RLock()
+	stream, exists := sm.streams[peerID]
+	sm.mu.RUnlock()
+	if !exists {
+		fmt.Println("Peer not connected")
+		return
+	}
+	nick, shortID := sm.displayName(peerID)
+	_ = stream.Close()
+	if nick != "" {
+		fmt.Printf("Disconnected from [%s] [%s]\n", colorize(91, nick), colorize(96, shortID))
+	} else {
+		fmt.Printf("Disconnected from [%s]\n", colorize(96, shortID))
+	}
+}
+
 func (sm *StreamManager) ReconnectPeer(peerIDStr string) {
 	if sm.dht == nil {
 		NotifyReconnectStatus(peerIDStr, "failed", "DHT başlatılmamış")
@@ -1052,7 +1073,7 @@ func CreateNode(sm *StreamManager, identityName string, dataDir string, listenIP
 
 	node, err := libp2p.New(
 		libp2p.Identity(priv),
-		libp2p.ListenAddrStrings(fmt.Sprintf("/ip4/%s/tcp/0", ip)),
+		libp2p.ListenAddrStrings(fmt.Sprintf("/ip4/%s/tcp/57891", ip)),
 	)
 	if err != nil {
 		return nil, err

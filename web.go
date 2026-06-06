@@ -148,7 +148,15 @@ func (wc *WebClient) handleWSMessage(msg WSMessage) {
 		}
 
 	case "disconnect_peer":
-		wc.sm.disconnectActivePeer()
+		var p struct {
+			PeerID string `json:"peerId"`
+		}
+		json.Unmarshal(msg.Payload, &p)
+		if p.PeerID != "" {
+			wc.sm.disconnectSpecificPeer(p.PeerID)
+		} else {
+			wc.sm.disconnectActivePeer()
+		}
 	case "save_peer":
 		var p struct {
 			PeerID   string `json:"peerId"`
