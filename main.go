@@ -415,6 +415,10 @@ func (sm *StreamManager) HandleInput() {
 			sm.mu.Unlock()
 		}
 	}
+
+	if err := scanner.Err(); err != nil {
+		fmt.Printf("Input error: %v\n", err)
+	}
 }
 
 func (sm *StreamManager) handleCommand(cmd string) {
@@ -1073,7 +1077,7 @@ func CreateNode(sm *StreamManager, identityName string, dataDir string, listenIP
 
 	node, err := libp2p.New(
 		libp2p.Identity(priv),
-		libp2p.ListenAddrStrings(fmt.Sprintf("/ip4/%s/tcp/57891", ip)),
+		libp2p.ListenAddrStrings(fmt.Sprintf("/ip4/%s/tcp/0", ip)),
 	)
 	if err != nil {
 		return nil, err

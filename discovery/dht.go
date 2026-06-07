@@ -119,7 +119,7 @@ func (d *DHTService) Advertise(namespace string) error {
 func (d *DHTService) AdvertiseContinuously(namespace string) {
 	d.Advertise(namespace)
 
-	ticker := time.NewTicker(15 * time.Minute)
+	ticker := time.NewTicker(1 * time.Minute)
 	defer ticker.Stop()
 
 	for {
