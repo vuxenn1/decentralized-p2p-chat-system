@@ -1,18 +1,18 @@
-# Secure and Serverless Decentralized P2P Communication System
+# Peer-to-Peer Connection based Secure Chat System
 
-A fully decentralized peer-to-peer chat application built with Go and Flutter. No central server. No accounts. No data collection.
+A fully decentralized peer-to-peer chat application built with Go. No central server. No accounts. No data collection.
 
-**Erzurum Technical University — Computer Engineering**
+**Erzurum Technical University - Computer Engineering**
 
 ---
 
 ## Features
 
-- Fully decentralized — no central server or authority
+- Fully decentralized: No central server or authority
 - End-to-end encrypted messaging (X25519 key exchange + ChaCha20-Poly1305)
 - Persistent cryptographic identity per user (Ed25519)
 - DHT-based peer discovery (Kademlia via libp2p)
-- Connection approval — incoming connections require explicit accept/reject
+- Connection approval: Incoming connections require explicit accept/reject
 - Encrypted local message history (HKDF key derivation + ChaCha20-Poly1305)
 - Trusted peer saving with custom nicknames
 - Android mobile app with embedded Go backend
@@ -29,7 +29,6 @@ A fully decentralized peer-to-peer chat application built with Go and Flutter. N
 | Peer Discovery | Kademlia DHT |
 | Encryption | X25519 + ChaCha20-Poly1305 |
 | Identity | Ed25519 |
-| Mobile UI | Flutter (Dart) |
 
 ---
 
@@ -58,11 +57,11 @@ go run . --identity yournick
 
 ## Security Properties
 
-- **No plaintext transmission** — all messages encrypted before leaving the device
-- **Forward secrecy** — ephemeral session keys derived per connection
-- **Local storage encryption** — message history encrypted with HKDF-derived key unique to each conversation
-- **Identity verification** — peer IDs are derived from Ed25519 public keys, cannot be spoofed
-- **No central authority** — no server can read, store, or censor messages
+- **No plaintext transmission**: all messages encrypted before leaving the device
+- **Forward secrecy**: Temporary session keys derived per connection
+- **Local storage encryption**: Message history encrypted with HKDF-derived key unique to each conversation
+- **Identity verification**: Peer IDs are derived from Ed25519 public keys, cannot be spoofed
+- **No central authority**: No server can read, store, or censor messages
 
 ---
 
@@ -76,7 +75,6 @@ go run . --identity yournick
 ---
 
 ## Academic Notice
-
 This project was developed as a graduation engineering design project at Erzurum Technical University, Department of Computer Engineering, 2025–2026 academic year.
 
 All rights reserved. This codebase is shared for academic and demonstration purposes only.
