@@ -15,7 +15,6 @@ A fully decentralized peer-to-peer chat application built with Go. No central se
 - Connection approval: Incoming connections require explicit accept/reject
 - Encrypted local message history (HKDF key derivation + ChaCha20-Poly1305)
 - Trusted peer saving with custom nicknames
-- Android mobile app with embedded Go backend
 - Cross-platform CLI for desktop use
 
 ---
