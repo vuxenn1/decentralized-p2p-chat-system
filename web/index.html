@@ -42,11 +42,26 @@
 
         <div id="discoveryStatus" class="discovery-status" style="display: none;"></div>
 
+        <div class="side-section" id="requestsSection" style="display: none;">
+            <div class="side-section-title">Connection Requests</div>
+            <div id="requestsList"></div>
+        </div>
+
+        <div class="side-section" id="trustedSection" style="display: none;">
+            <div class="side-section-title">Saved Peers</div>
+            <div id="trustedList"></div>
+        </div>
+
         <div class="peers-list" id="peersList">
             <div class="empty-state">
                 <p>No connected peers yet</p>
                 <small>Click "Discover" to find peers</small>
             </div>
+        </div>
+
+        <div class="side-section" id="offlineSection" style="display: none;">
+            <div class="side-section-title">Offline</div>
+            <div id="offlineList"></div>
         </div>
 
         <div class="discovered-section" id="discoveredSection" style="display: none;">
@@ -62,6 +77,11 @@
         <div class="chat-header">
             <h3 id="chatTitle">Select a peer to start chatting</h3>
             <span class="status" id="statusIndicator">●</span>
+            <div class="chat-actions">
+                <button class="btn btn-small" id="savePeerBtn" disabled>Save</button>
+                <button class="btn btn-small" id="clearHistoryBtn" disabled>Clear</button>
+                <button class="btn btn-small btn-danger" id="disconnectBtn" disabled>Disconnect</button>
+            </div>
         </div>
 
         <div class="messages-container" id="messages">

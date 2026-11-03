@@ -54,7 +54,7 @@ Current mitigation:
 Residual risk:
 
 - The application-layer handshake signs the transcript with the Ed25519 identity and verifies the remote libp2p public key. Formal verification is still pending.
-- Replay handling assumes ordered delivery; out-of-order packets are rejected.
+- Replay handling uses a 64-packet sliding window. Duplicates and packets older than the window are rejected. Limited reordering is accepted.
 - No formal verification yet.
 
 ### C. Malicious peer

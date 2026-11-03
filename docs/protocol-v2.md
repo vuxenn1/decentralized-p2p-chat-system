@@ -132,7 +132,7 @@ The receiver verifies that the envelope sender matches the remote peer ID of the
 - The envelope does not replace transport encryption. libp2p Noise remains the transport trust anchor.
 - The application-layer session binds the envelope to direction-separated keys.
 - The handshake signs a transcript containing both ephemeral keys and both identity keys. The envelope is bound to the resulting session keys.
-- Replay handling belongs to the session layer and uses a monotonic counter.
+- Replay handling belongs to the session layer and uses a 64-packet sliding window.
 - All identifiers and sizes must be validated before use.
 
 ## Open questions

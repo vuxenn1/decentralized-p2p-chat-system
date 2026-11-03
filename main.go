@@ -314,6 +314,9 @@ func (sm *StreamManager) forgetPeer(peerID peerstore.ID) {
 		sm.activeID = ""
 	}
 	sm.mu.Unlock()
+
+	nick, shortID := sm.displayName(peerID)
+	NotifyPeerDisconnected(peerID.String(), nick, shortID)
 	NotifyWebPeerUpdate()
 }
 
@@ -363,6 +366,7 @@ func (sm *StreamManager) HandleInput() {
 				IsOwn:     true,
 			})
 		}
+		NotifyWebMessage(sm.node.ID().String(), sm.localNick, text, true, activeID.String(), false)
 	}
 
 	if err := scanner.Err(); err != nil {
@@ -797,12 +801,14 @@ func (sm *StreamManager) connectToPeer(address string) {
 	addr, err := multiaddr.NewMultiaddr(address)
 	if err != nil {
 		fmt.Printf("Invalid multiaddr: %v\n", err)
+		NotifyWebError("Invalid multiaddress")
 		return
 	}
 
 	peerInfo, err := peerstore.AddrInfoFromP2pAddr(addr)
 	if err != nil {
 		fmt.Printf("Invalid peer info: %v\n", err)
+		NotifyWebError("Invalid peer information")
 		return
 	}
 
@@ -812,6 +818,7 @@ func (sm *StreamManager) connectToPeer(address string) {
 
 	if alreadyConnected {
 		fmt.Println("Already connected to this peer")
+		NotifyWebError("Already connected to this peer")
 		return
 	}
 
@@ -819,12 +826,14 @@ func (sm *StreamManager) connectToPeer(address string) {
 
 	if err := sm.node.Connect(sm.ctx, *peerInfo); err != nil {
 		fmt.Printf("Connection failed: %v\n", err)
+		NotifyWebError("Connection failed: " + err.Error())
 		return
 	}
 
 	s, err := sm.node.NewStream(sm.ctx, peerInfo.ID, ChatProtocolID)
 	if err != nil {
 		fmt.Printf("Failed to open stream: %v\n", err)
+		NotifyWebError("Could not open a chat stream")
 		return
 	}
 
@@ -832,6 +841,7 @@ func (sm *StreamManager) connectToPeer(address string) {
 	_, err = s.Write([]byte(ConnReqPrefix + sm.localNick + "\n"))
 	if err != nil {
 		fmt.Printf("Failed to send connection request: %v\n", err)
+		NotifyWebError("Could not send the connection request")
 		_ = s.Close()
 		return
 	}
@@ -852,12 +862,14 @@ func (sm *StreamManager) connectToPeer(address string) {
 	case res := <-resultCh:
 		if res.err != nil {
 			fmt.Printf("No response from peer: %v\n", res.err)
+			NotifyWebError("No response from the peer")
 			_ = s.Close()
 			return
 		}
 		response = res.line
 	case <-time.After(35 * time.Second):
 		fmt.Printf("Connection request timed out\n")
+		NotifyWebError("Connection request timed out")
 		_ = s.Close()
 		return
 	}

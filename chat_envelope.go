@@ -204,7 +204,7 @@ func (sm *StreamManager) handleEnvelope(peerID peerstore.ID, envelope *protocol.
 			colorize(93, time.Now().Format("15:04")),
 			colorize(96, display),
 			body.Text)
-		NotifyWebMessage(peerID.String(), display, body.Text, false)
+		NotifyWebMessage(peerID.String(), display, body.Text, false, peerID.String(), true)
 
 	case protocol.TypeAck:
 		var body ackBody

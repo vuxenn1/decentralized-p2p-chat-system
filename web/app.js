@@ -1,5 +1,10 @@
 let ws;
 let activePeer = null;
+let activePeerName = "";
+let peers = [];
+let trustedPeers = [];
+let pendingRequests = [];
+const offlinePeers = new Map();
 const messagesByPeer = {};
 
 const qs = id => document.getElementById(id);
@@ -7,10 +12,6 @@ const qs = id => document.getElementById(id);
 // =====================
 // ACCESS TOKEN
 // =====================
-// The Go backend prints a URL with the token in the fragment:
-//   http://127.0.0.1:9090/#token=...
-// The fragment never leaves the browser, so the token is not sent to the
-// static file server. It is kept in sessionStorage for reconnects.
 function readToken() {
     const params = new URLSearchParams(location.hash.replace(/^#/, ''));
     const fromHash = params.get('token');
@@ -33,7 +34,7 @@ function wsURL() {
 // =====================
 function connectWS() {
     if (!apiToken) {
-        showDiscoveryStatus('Missing access token. Open the URL printed in the terminal.');
+        setStatus('Missing access token. Open the URL printed in the terminal.');
         return;
     }
 
@@ -44,11 +45,11 @@ function connectWS() {
     };
 
     ws.onmessage = e => {
-        const m = JSON.parse(e.data);
-        handleWebSocketMessage(m);
+        const message = JSON.parse(e.data);
+        handleWebSocketMessage(message);
     };
 
-    ws.onerror = (error) => {
+    ws.onerror = error => {
         console.error('WebSocket error:', error);
     };
 
@@ -62,47 +63,114 @@ function wsReady() {
     return ws && ws.readyState === WebSocket.OPEN;
 }
 
-function handleWebSocketMessage(m) {
-    switch (m.type) {
+function handleWebSocketMessage(message) {
+    switch (message.type) {
         case "node_info":
-            qs("nodeNick").textContent = m.payload.nickname || "anon";
-            qs("nodeId").textContent = m.payload.id.substring(m.payload.id.length - 8);
-            qs("nodeAddr").textContent = m.payload.addresses[0] || "-";
+            qs("nodeNick").textContent = message.payload.nickname || "anon";
+            qs("nodeId").textContent = message.payload.id.substring(message.payload.id.length - 8);
+            qs("nodeAddr").textContent = message.payload.addresses[0] || "-";
             break;
 
         case "peers_list":
-            renderPeers(m.payload);
+            peers = Array.isArray(message.payload) ? message.payload : [];
+            peers.forEach(peer => offlinePeers.delete(peer.id));
+            renderPeers();
+            renderOffline();
+            renderTrusted();
+            updateActiveState();
             break;
 
         case "new_message":
-            storeMessage(m.payload);
+            storeMessage(message.payload);
+            break;
+
+        case "connection_request": {
+            const request = message.payload || {};
+            if (request.peerId && !pendingRequests.some(item => item.peerId === request.peerId)) {
+                pendingRequests.push(request);
+                renderRequests();
+                setStatus(`Connection request from ${request.nickname || request.shortId || request.peerId}`);
+            }
+            break;
+        }
+
+        case "connection_rejected":
+            setStatus('Your connection request was rejected');
+            break;
+
+        case "peer_history":
+            mergeHistory(message.payload || {});
+            break;
+
+        case "trusted_peers_list":
+            trustedPeers = Array.isArray(message.payload) ? message.payload : [];
+            renderTrusted();
+            renderOffline();
+            updateActiveState();
+            break;
+
+        case "peer_disconnected": {
+            const payload = message.payload || {};
+            if (payload.peerId) {
+                offlinePeers.set(payload.peerId, {
+                    peerId: payload.peerId,
+                    nickname: payload.nickname || "",
+                    shortId: payload.shortId || shortId(payload.peerId)
+                });
+                renderOffline();
+                renderTrusted();
+                updateActiveState();
+                setStatus(`${payload.nickname || payload.shortId || 'Peer'} went offline`);
+            }
+            break;
+        }
+
+        case "reconnect_status": {
+            const payload = message.payload || {};
+            if (payload.status === 'connected' && payload.peerId) {
+                offlinePeers.delete(payload.peerId);
+                renderOffline();
+                renderTrusted();
+            }
+            setStatus(payload.message || payload.status || 'Reconnect status changed');
+            break;
+        }
+
+        case "error":
+            setStatus((message.payload && message.payload.message) || 'Backend error');
             break;
 
         case "discovery_status":
-            showDiscoveryStatus(m.payload.status);
+            setStatus((message.payload && message.payload.status) || '');
             break;
 
         case "discovered_peer":
-            addDiscoveredPeer(m.payload);
-            showDiscoveryStatus(`Found ${m.payload.count} peer(s)...`);
+            addDiscoveredPeer(message.payload);
+            setStatus(`Found ${message.payload.count} peer(s)...`);
             break;
 
         case "discovery_complete":
-            showDiscoveryStatus(`Discovery complete! Found ${m.payload.count} peer(s)`);
-            setTimeout(() => {
-                qs("discoveryStatus").style.display = "none";
-            }, 3000);
+            setStatus(`Discovery complete. Found ${message.payload.count} peer(s)`);
             break;
     }
 }
 
 // =====================
-// DISCOVERY STATUS
+// STATUS
 // =====================
-function showDiscoveryStatus(text) {
+let statusTimer = null;
+
+function setStatus(text) {
     const statusEl = qs("discoveryStatus");
     statusEl.textContent = text;
     statusEl.style.display = "block";
+
+    if (statusTimer) {
+        clearTimeout(statusTimer);
+    }
+    statusTimer = setTimeout(() => {
+        statusEl.style.display = "none";
+    }, 6000);
 }
 
 // =====================
@@ -114,8 +182,6 @@ function addDiscoveredPeer(peer) {
 
     section.style.display = "block";
 
-    const shortId = peer.id.substring(peer.id.length - 8);
-
     const item = document.createElement("div");
     item.className = "discovered-peer-item";
 
@@ -124,7 +190,7 @@ function addDiscoveredPeer(peer) {
 
     const name = document.createElement("div");
     name.className = "discovered-peer-name";
-    name.textContent = `Peer ${shortId}`;
+    name.textContent = `Peer ${shortId(peer.id)}`;
 
     const addr = document.createElement("div");
     addr.className = "discovered-peer-addr";
@@ -146,7 +212,7 @@ function connectToDiscoveredPeer(address) {
     if (!confirmed) return;
 
     if (!wsReady()) {
-        showDiscoveryStatus("Not connected to the local backend.");
+        setStatus("Not connected to the local backend.");
         return;
     }
 
@@ -155,24 +221,47 @@ function connectToDiscoveredPeer(address) {
         payload: { address: address }
     }));
 
-    showDiscoveryStatus("Connecting to peer...");
-
+    setStatus("Connecting to peer...");
     setTimeout(() => {
         qs("discoveredList").innerHTML = "";
         qs("discoveredSection").style.display = "none";
     }, 2000);
 }
 
-// Close discovered peers list
 qs("closeDiscovered").onclick = () => {
     qs("discoveredSection").style.display = "none";
     qs("discoveredList").innerHTML = "";
 };
 
 // =====================
-// PEERS MANAGEMENT
+// PEER HELPERS
 // =====================
-function renderPeers(peers) {
+function shortId(id) {
+    if (!id) return "";
+    return id.length > 8 ? id.substring(id.length - 8) : id;
+}
+
+function isConnected(id) {
+    return peers.some(peer => peer.id === id);
+}
+
+function peerLabel(id) {
+    const connected = peers.find(peer => peer.id === id);
+    if (connected) return connected.nickname || shortId(id);
+
+    const saved = trustedPeers.find(peer => peer.peerId === id);
+    if (saved) return saved.nickname || shortId(id);
+
+    const offline = offlinePeers.get(id);
+    if (offline) return offline.nickname || offline.shortId || shortId(id);
+
+    return shortId(id);
+}
+
+// =====================
+// PEER RENDERING
+// =====================
+function renderPeers() {
     const list = qs("peersList");
     list.innerHTML = "";
 
@@ -186,59 +275,283 @@ function renderPeers(peers) {
         return;
     }
 
-    peers.forEach(p => {
-        const d = document.createElement("div");
-        d.className = "peer-item";
-        if (activePeer === p.id) {
-            d.classList.add("active");
+    peers.forEach(peer => {
+        const row = document.createElement("div");
+        row.className = "peer-item";
+        if (activePeer === peer.id) {
+            row.classList.add("active");
         }
 
         const name = document.createElement("div");
         name.className = "peer-name";
-        name.textContent = p.nickname;
+        name.textContent = peer.nickname || shortId(peer.id);
 
         const id = document.createElement("div");
         id.className = "peer-id";
-        id.textContent = p.shortId;
+        id.textContent = peer.shortId || shortId(peer.id);
 
-        d.append(name, id);
-        d.onclick = () => openPeer(p.id, p.nickname, d);
-        list.appendChild(d);
+        row.append(name, id);
+        row.onclick = () => openPeer(peer.id, name.textContent);
+        list.appendChild(row);
     });
 }
 
-function openPeer(id, name, element) {
-    activePeer = id;
+function renderRequests() {
+    const section = qs("requestsSection");
+    const list = qs("requestsList");
 
-    document.querySelectorAll('.peer-item').forEach(item => {
-        item.classList.remove('active');
-    });
-    if (element) {
-        element.classList.add('active');
+    if (pendingRequests.length === 0) {
+        section.style.display = "none";
+        list.innerHTML = "";
+        return;
     }
 
-    qs("chatTitle").textContent = `Chat with ${name}`;
-    qs("messageInput").disabled = false;
-    qs("sendBtn").disabled = false;
+    section.style.display = "block";
+    list.innerHTML = "";
 
+    pendingRequests.forEach(request => {
+        const item = document.createElement("div");
+        item.className = "request-item";
+
+        const name = document.createElement("div");
+        name.className = "request-name";
+        name.textContent = request.nickname || shortId(request.peerId);
+
+        const id = document.createElement("div");
+        id.className = "request-id";
+        id.textContent = request.shortId || shortId(request.peerId);
+
+        const actions = document.createElement("div");
+        actions.className = "request-actions";
+
+        const reject = document.createElement("button");
+        reject.className = "btn btn-small btn-reject";
+        reject.textContent = "Reject";
+        reject.onclick = () => respondToRequest(request.peerId, false);
+
+        const accept = document.createElement("button");
+        accept.className = "btn btn-small btn-accept";
+        accept.textContent = "Accept";
+        accept.onclick = () => respondToRequest(request.peerId, true);
+
+        actions.append(reject, accept);
+        item.append(name, id, actions);
+        list.appendChild(item);
+    });
+}
+
+function respondToRequest(peerID, accepted) {
+    if (!wsReady()) {
+        setStatus("Not connected to the local backend.");
+        return;
+    }
+    ws.send(JSON.stringify({
+        type: "connection_response",
+        payload: { peerId: peerID, accepted: accepted }
+    }));
+    pendingRequests = pendingRequests.filter(request => request.peerId !== peerID);
+    renderRequests();
+    setStatus(accepted ? "Connection accepted" : "Connection rejected");
+}
+
+function renderTrusted() {
+    const section = qs("trustedSection");
+    const list = qs("trustedList");
+
+    if (trustedPeers.length === 0) {
+        section.style.display = "none";
+        list.innerHTML = "";
+        return;
+    }
+
+    section.style.display = "block";
+    list.innerHTML = "";
+
+    trustedPeers.forEach(peer => {
+        const row = document.createElement("div");
+        row.className = "trusted-item";
+
+        const dot = document.createElement("span");
+        dot.className = "peer-status-dot";
+        if (isConnected(peer.peerId)) {
+            dot.classList.add("online");
+        }
+
+        const meta = document.createElement("div");
+        meta.className = "peer-meta";
+
+        const name = document.createElement("div");
+        name.className = "peer-name";
+        name.textContent = peer.nickname || shortId(peer.peerId);
+
+        const id = document.createElement("div");
+        id.className = "peer-id";
+        id.textContent = shortId(peer.peerId);
+
+        meta.append(name, id);
+
+        const remove = document.createElement("button");
+        remove.className = "btn btn-small btn-danger";
+        remove.textContent = "Remove";
+        remove.onclick = event => {
+            event.stopPropagation();
+            if (!wsReady()) return;
+            ws.send(JSON.stringify({
+                type: "remove_peer",
+                payload: { peerId: peer.peerId }
+            }));
+            trustedPeers = trustedPeers.filter(item => item.peerId !== peer.peerId);
+            renderTrusted();
+            renderOffline();
+            setStatus("Saved peer removed");
+        };
+
+        row.append(dot, meta, remove);
+        row.onclick = () => openPeer(peer.peerId, name.textContent);
+        list.appendChild(row);
+    });
+}
+
+function renderOffline() {
+    const section = qs("offlineSection");
+    const list = qs("offlineList");
+
+    const entries = [...offlinePeers.values()].filter(peer => {
+        if (isConnected(peer.peerId)) return false;
+        return !trustedPeers.some(item => item.peerId === peer.peerId);
+    });
+
+    if (entries.length === 0) {
+        section.style.display = "none";
+        list.innerHTML = "";
+        return;
+    }
+
+    section.style.display = "block";
+    list.innerHTML = "";
+
+    entries.forEach(peer => {
+        const row = document.createElement("div");
+        row.className = "offline-item";
+
+        const meta = document.createElement("div");
+        meta.className = "peer-meta";
+
+        const name = document.createElement("div");
+        name.className = "peer-name";
+        name.textContent = peer.nickname || peer.shortId || shortId(peer.peerId);
+
+        const id = document.createElement("div");
+        id.className = "peer-id";
+        id.textContent = peer.shortId || shortId(peer.peerId);
+
+        meta.append(name, id);
+
+        const reconnect = document.createElement("button");
+        reconnect.className = "btn btn-small";
+        reconnect.textContent = "Reconnect";
+        reconnect.onclick = event => {
+            event.stopPropagation();
+            if (!wsReady()) return;
+            ws.send(JSON.stringify({
+                type: "reconnect_peer",
+                payload: { peerId: peer.peerId }
+            }));
+            setStatus("Reconnecting...");
+        };
+
+        row.append(meta, reconnect);
+        row.onclick = () => openPeer(peer.peerId, name.textContent);
+        list.appendChild(row);
+    });
+}
+
+// =====================
+// ACTIVE CHAT
+// =====================
+function openPeer(id, name) {
+    activePeer = id;
+    activePeerName = name || peerLabel(id);
+
+    qs("chatTitle").textContent = `Chat with ${activePeerName}`;
+
+    renderPeers();
+    renderTrusted();
+    renderOffline();
+    updateActiveState();
     renderMessages();
 }
 
-// =====================
-// MESSAGES MANAGEMENT
-// =====================
-function storeMessage(m) {
-    const pid = m.isOwn ? activePeer : m.from;
+function updateActiveState() {
+    const connected = activePeer ? isConnected(activePeer) : false;
 
-    if (!pid) return;
+    qs("messageInput").disabled = !activePeer || !connected;
+    qs("sendBtn").disabled = !activePeer || !connected;
+    qs("savePeerBtn").disabled = !activePeer;
+    qs("clearHistoryBtn").disabled = !activePeer;
+    qs("disconnectBtn").disabled = !activePeer || !connected;
 
-    if (!messagesByPeer[pid]) {
-        messagesByPeer[pid] = [];
+    const status = qs("statusIndicator");
+    status.textContent = connected ? "●" : "○";
+    status.style.color = connected ? "#16a34a" : "#9ca3af";
+}
+
+function mergeHistory(payload) {
+    const peerId = payload.peerId || "";
+    const messages = Array.isArray(payload.messages) ? payload.messages : [];
+    if (!peerId) return;
+
+    const existing = messagesByPeer[peerId] || [];
+    const byId = new Map();
+
+    existing.forEach(message => {
+        byId.set(message.id || `${message.timestamp}-${message.content}`, message);
+    });
+    messages.forEach(message => {
+        byId.set(message.id || `${message.timestamp}-${message.content}`, message);
+    });
+
+    messagesByPeer[peerId] = [...byId.values()].sort((a, b) => {
+        return new Date(a.timestamp) - new Date(b.timestamp);
+    });
+
+    if (!isConnected(peerId) && !trustedPeers.some(peer => peer.peerId === peerId)) {
+        const lastReceived = [...messages].reverse().find(message => !message.isOwn);
+        offlinePeers.set(peerId, {
+            peerId: peerId,
+            nickname: lastReceived ? lastReceived.fromName : "",
+            shortId: shortId(peerId)
+        });
+        renderOffline();
     }
 
-    messagesByPeer[pid].push(m);
+    if (peerId === activePeer) {
+        renderMessages();
+    }
+}
 
-    if (pid === activePeer) {
+// =====================
+// MESSAGES
+// =====================
+function storeMessage(message) {
+    if (!message) return;
+
+    const peerId = message.isOwn
+        ? (message.to || activePeer)
+        : message.from;
+
+    if (!peerId) return;
+
+    const list = messagesByPeer[peerId] || [];
+    const key = message.id || `${message.timestamp}-${message.content}`;
+    if (list.some(item => (item.id || `${item.timestamp}-${item.content}`) === key)) {
+        return;
+    }
+
+    list.push(message);
+    messagesByPeer[peerId] = list;
+
+    if (peerId === activePeer) {
         renderMessages();
     }
 }
@@ -247,9 +560,9 @@ function renderMessages() {
     const box = qs("messages");
     box.innerHTML = "";
 
-    const msgs = messagesByPeer[activePeer] || [];
+    const messages = messagesByPeer[activePeer] || [];
 
-    if (msgs.length === 0) {
+    if (messages.length === 0) {
         box.innerHTML = `
             <div class="empty-chat">
                 <p>No messages yet</p>
@@ -259,31 +572,29 @@ function renderMessages() {
         return;
     }
 
-    msgs.forEach(m => {
-        const d = document.createElement("div");
-        d.className = m.isOwn ? "msg own" : "msg";
+    messages.forEach(message => {
+        const row = document.createElement("div");
+        row.className = message.isOwn ? "msg own" : "msg";
 
-        const time = new Date(m.timestamp).toLocaleTimeString('en-US', {
+        const time = new Date(message.timestamp).toLocaleTimeString('en-US', {
             hour: '2-digit',
             minute: '2-digit'
         });
 
-        const displayName = m.isOwn ? "You" : m.fromName;
-
         const header = document.createElement("div");
         header.className = "msg-header";
-        header.textContent = displayName;
+        header.textContent = message.isOwn ? "You" : (message.fromName || peerLabel(message.from));
 
         const content = document.createElement("div");
         content.className = "msg-content";
-        content.textContent = m.content;
+        content.textContent = message.content;
 
         const timeEl = document.createElement("div");
         timeEl.className = "msg-time";
         timeEl.textContent = time;
 
-        d.append(header, content, timeEl);
-        box.appendChild(d);
+        row.append(header, content, timeEl);
+        box.appendChild(row);
     });
 
     box.scrollTop = box.scrollHeight;
@@ -294,7 +605,7 @@ function renderMessages() {
 // =====================
 qs("discoverBtn").onclick = () => {
     if (!wsReady()) {
-        showDiscoveryStatus("Not connected to the local backend.");
+        setStatus("Not connected to the local backend.");
         return;
     }
 
@@ -302,63 +613,90 @@ qs("discoverBtn").onclick = () => {
     qs("discoveredSection").style.display = "none";
 
     ws.send(JSON.stringify({ type: "discover_peers" }));
-    showDiscoveryStatus("Starting discovery...");
+    setStatus("Starting discovery...");
 };
 
-qs("sendBtn").onclick = () => {
-    sendMessage();
-};
+qs("sendBtn").onclick = () => sendMessage();
 
-qs("messageInput").addEventListener("keypress", (e) => {
-    if (e.key === "Enter" && !e.shiftKey) {
-        e.preventDefault();
+qs("messageInput").addEventListener("keypress", event => {
+    if (event.key === "Enter" && !event.shiftKey) {
+        event.preventDefault();
         sendMessage();
     }
 });
 
 function sendMessage() {
-    if (!activePeer) return;
+    if (!activePeer || !isConnected(activePeer)) return;
 
     const input = qs("messageInput");
     const content = input.value.trim();
-
     if (!content) return;
 
     if (!wsReady()) {
-        showDiscoveryStatus("Not connected to the local backend.");
+        setStatus("Not connected to the local backend.");
         return;
     }
 
     ws.send(JSON.stringify({
         type: "send_message",
-        payload: {
-            to: activePeer,
-            content: content
-        }
+        payload: { to: activePeer, content: content }
     }));
 
     input.value = "";
 }
 
 qs("connectBtn").onclick = () => {
-    const addr = prompt("Enter peer multiaddress:\n\nExample:\n/ip4/192.168.1.100/tcp/12345/p2p/...");
-
-    if (!addr) return;
+    const address = prompt("Enter peer multiaddress:\n\nExample:\n/ip4/192.168.1.100/tcp/12345/p2p/...");
+    if (!address) return;
 
     if (!wsReady()) {
-        showDiscoveryStatus("Not connected to the local backend.");
+        setStatus("Not connected to the local backend.");
         return;
     }
 
     ws.send(JSON.stringify({
         type: "connect_peer",
-        payload: { address: addr }
+        payload: { address: address }
     }));
 
-    showDiscoveryStatus("Connecting to peer...");
-    setTimeout(() => {
-        qs("discoveryStatus").style.display = "none";
-    }, 3000);
+    setStatus("Connecting to peer...");
+};
+
+qs("savePeerBtn").onclick = () => {
+    if (!activePeer) return;
+    const nickname = prompt("Save this peer as:", activePeerName);
+    if (!nickname || !wsReady()) return;
+
+    ws.send(JSON.stringify({
+        type: "save_peer",
+        payload: { peerId: activePeer, nickname: nickname }
+    }));
+    setStatus("Peer saved");
+};
+
+qs("clearHistoryBtn").onclick = () => {
+    if (!activePeer) return;
+    if (!confirm(`Clear history with ${activePeerName}?`)) return;
+    if (!wsReady()) return;
+
+    ws.send(JSON.stringify({
+        type: "clear_history",
+        payload: { peerId: activePeer }
+    }));
+
+    messagesByPeer[activePeer] = [];
+    renderMessages();
+    setStatus("History cleared");
+};
+
+qs("disconnectBtn").onclick = () => {
+    if (!activePeer || !wsReady()) return;
+
+    ws.send(JSON.stringify({
+        type: "disconnect_peer",
+        payload: { peerId: activePeer }
+    }));
+    setStatus("Disconnected");
 };
 
 // =====================

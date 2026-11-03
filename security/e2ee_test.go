@@ -149,7 +149,7 @@ func TestReplayRejected(t *testing.T) {
 	}
 }
 
-func TestOutOfOrderCounterRejected(t *testing.T) {
+func TestOutOfOrderCounterAccepted(t *testing.T) {
 	alice, bob := pair(t)
 
 	first, err := alice.Encrypt([]byte("first"))
@@ -164,8 +164,34 @@ func TestOutOfOrderCounterRejected(t *testing.T) {
 	if _, err := bob.Decrypt(second); err != nil {
 		t.Fatalf("second packet should be accepted first: %v", err)
 	}
-	if _, err := bob.Decrypt(first); err == nil {
-		t.Error("older packet was accepted after a newer counter")
+	if _, err := bob.Decrypt(first); err != nil {
+		t.Fatalf("packet inside the replay window was rejected: %v", err)
+	}
+	if _, err := bob.Decrypt(second); err == nil {
+		t.Error("duplicate packet was accepted")
+	}
+}
+
+func TestReplayWindowRejectsOldPacket(t *testing.T) {
+	alice, bob := pair(t)
+
+	packets := make([]string, 0, 65)
+	for i := 0; i < 65; i++ {
+		packet, err := alice.Encrypt([]byte("packet"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		packets = append(packets, packet)
+	}
+
+	if _, err := bob.Decrypt(packets[64]); err != nil {
+		t.Fatalf("newest packet was rejected: %v", err)
+	}
+	if _, err := bob.Decrypt(packets[0]); err == nil {
+		t.Error("packet older than the replay window was accepted")
+	}
+	if _, err := bob.Decrypt(packets[1]); err != nil {
+		t.Errorf("packet inside the replay window was rejected: %v", err)
 	}
 }
 

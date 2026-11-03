@@ -45,6 +45,7 @@ type WebMsg struct {
 	ID        string    `json:"id"`
 	From      string    `json:"from"`
 	FromName  string    `json:"fromName"`
+	To        string    `json:"to,omitempty"`
 	Content   string    `json:"content"`
 	Timestamp time.Time `json:"timestamp"`
 	IsOwn     bool      `json:"isOwn"`
@@ -417,21 +418,24 @@ func (wc *WebClient) notifyPeerUpdate() {
 func (wc *WebClient) sendMessageToPeer(peerIDStr, content string) {
 	peerID, err := peerstore.Decode(peerIDStr)
 	if err != nil {
+		NotifyWebError("Invalid peer ID")
 		return
 	}
 
 	if _, err := wc.sm.sendChat(peerID, content); err != nil {
+		NotifyWebError("Could not send message: " + err.Error())
 		return
 	}
 
-	wc.addMessage(wc.sm.node.ID().String(), wc.sm.localNick, content, true, peerIDStr)
+	wc.addMessage(wc.sm.node.ID().String(), wc.sm.localNick, content, true, peerIDStr, true)
 }
 
-func (wc *WebClient) addMessage(from, fromName, content string, isOwn bool, conversationPeerID string) {
+func (wc *WebClient) addMessage(from, fromName, content string, isOwn bool, conversationPeerID string, persist bool) {
 	msg := WebMsg{
 		ID:        fmt.Sprintf("%d", time.Now().UnixNano()),
 		From:      from,
 		FromName:  fromName,
+		To:        conversationPeerID,
 		Content:   content,
 		Timestamp: time.Now(),
 		IsOwn:     isOwn,
@@ -442,7 +446,7 @@ func (wc *WebClient) addMessage(from, fromName, content string, isOwn bool, conv
 	wc.messagesMu.Unlock()
 
 	// Save to encrypted history
-	if wc.sm.historyStore != nil && conversationPeerID != "" {
+	if persist && wc.sm.historyStore != nil && conversationPeerID != "" {
 		go wc.sm.historyStore.SaveMessage(conversationPeerID, storage.StoredMsg{
 			ID:        msg.ID,
 			From:      msg.From,
@@ -491,9 +495,9 @@ func (wc *WebClient) sendToClient(conn *websocket.Conn, t string, payload interf
 	conn.WriteMessage(websocket.TextMessage, data)
 }
 
-func NotifyWebMessage(from, fromName, content string, isOwn bool) {
+func NotifyWebMessage(from, fromName, content string, isOwn bool, conversationPeerID string, persist bool) {
 	if wc := webClient.Load(); wc != nil {
-		wc.addMessage(from, fromName, content, isOwn, from)
+		wc.addMessage(from, fromName, content, isOwn, conversationPeerID, persist)
 	}
 }
 
@@ -523,6 +527,14 @@ func NotifyWebConnectionRejected(peerID string) {
 	if wc := webClient.Load(); wc != nil {
 		wc.broadcast("connection_rejected", map[string]string{
 			"peerId": peerID,
+		})
+	}
+}
+
+func NotifyWebError(message string) {
+	if wc := webClient.Load(); wc != nil {
+		wc.broadcast("error", map[string]string{
+			"message": message,
 		})
 	}
 }

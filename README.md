@@ -47,7 +47,7 @@ The APK is a build artifact of the private Flutter app. It is not part of this r
 ## Security model (current)
 
 - **Transport:** libp2p uses Noise/TLS between peers. This provides authenticated transport encryption and peer identity binding.
-- **Application layer:** a second X25519 + ChaCha20-Poly1305 layer is present. It uses direction-separated keys, transcript binding and replay checks. The handshake signs the transcript with the Ed25519 identity and verifies the remote libp2p public key. It remains defense in depth.
+- **Application layer:** a second X25519 + ChaCha20-Poly1305 layer is present. It uses direction-separated keys, transcript binding and a 64-packet replay window. The handshake signs the transcript with the Ed25519 identity and verifies the remote libp2p public key. It remains defense in depth.
 - **Local API:** the browser API binds to `127.0.0.1` and requires a per-run token. The token is written to `api.token` in the data directory and printed in the web URL fragment.
 - **Local storage:** message history is encrypted at rest. The key is derived from the local identity key. The identity key is currently stored as a file, not in an OS keystore.
 - **Discovery:** the public IPFS DHT is used by default. This exposes peer IDs and network addresses to the DHT. A LAN-first discovery mode is planned.
@@ -109,7 +109,7 @@ go test ./...
 go vet ./...
 ```
 
-The security and storage packages contain focused tests for replay handling, direction separation, reflection rejection, path traversal and corrupt-file behavior.
+The security and storage packages contain focused tests for replay-window behavior, direction separation, reflection rejection, path traversal and corrupt-file behavior.
 
 ## Android binaries
 

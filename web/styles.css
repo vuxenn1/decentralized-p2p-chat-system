@@ -1,4 +1,4 @@
-:root {
+﻿:root {
     --navy: #1e3a8a;
     --navy-dark: #1e40af;
     --navy-light: #3b82f6;
@@ -596,3 +596,97 @@ body {
     scrollbar-width: thin;
     scrollbar-color: var(--border) var(--card);
 }
+/* Sidebar sections */
+.side-section {
+    border-bottom: 1px solid var(--border);
+}
+
+.side-section-title {
+    padding: 8px 12px 4px;
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--text-light);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+
+.request-item {
+    margin: 4px 8px;
+    padding: 8px;
+    border: 1px solid #f0c36d;
+    border-radius: 8px;
+    background: #fff8e6;
+}
+
+.request-name {
+    font-size: 12px;
+    font-weight: 600;
+}
+
+.request-id {
+    font-size: 10px;
+    color: var(--text-light);
+}
+
+.request-actions {
+    display: flex;
+    gap: 6px;
+    margin-top: 6px;
+}
+
+.btn-small {
+    padding: 4px 8px;
+    font-size: 11px;
+}
+
+.btn-accept {
+    background: #2e7d32;
+    color: #fff;
+}
+
+.btn-reject {
+    background: #c62828;
+    color: #fff;
+}
+
+.btn-danger {
+    background: #b91c1c;
+    color: #fff;
+}
+
+.chat-actions {
+    margin-left: auto;
+    display: flex;
+    gap: 6px;
+}
+
+.offline-item,
+.trusted-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 12px;
+    cursor: pointer;
+}
+
+.offline-item:hover,
+.trusted-item:hover {
+    background: #eef2f7;
+}
+
+.peer-meta {
+    flex: 1;
+    min-width: 0;
+}
+
+.peer-status-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: #9ca3af;
+}
+
+.peer-status-dot.online {
+    background: #16a34a;
+}
+

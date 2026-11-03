@@ -28,6 +28,8 @@ const (
 
 	directionLowToHigh byte = 1
 	directionHighToLow byte = 2
+
+	replayWindowBits = 64
 )
 
 var (
@@ -49,9 +51,8 @@ var (
 //
 // Outgoing messages use an increasing counter per direction. Incoming
 // messages are accepted only after AEAD verification and only if their
-// counter is strictly greater than the last accepted counter. This makes the
-// replay check O(1) in memory and ensures a forged packet cannot consume a
-// legitimate message's nonce.
+// counter is inside a 64-packet replay window. This accepts limited
+// reordering while rejecting duplicates and old packets.
 type Session struct {
 	sendAEAD cipher.AEAD
 	recvAEAD cipher.AEAD
@@ -61,8 +62,9 @@ type Session struct {
 
 	sendCtr uint64
 
-	recvMu   sync.Mutex
-	recvLast uint64
+	recvMu     sync.Mutex
+	recvMax    uint64
+	recvWindow uint64
 }
 
 // Handshake performs an authenticated X25519 key exchange and derives
@@ -279,12 +281,39 @@ func (s *Session) Decrypt(packet string) ([]byte, error) {
 	}
 
 	ctr := binary.LittleEndian.Uint64(nonce[4:])
-	s.recvMu.Lock()
-	defer s.recvMu.Unlock()
-	if ctr <= s.recvLast {
+	if !s.acceptCounter(ctr) {
 		return nil, ErrReplay
 	}
-	s.recvLast = ctr
 
 	return plain, nil
+}
+
+// acceptCounter applies a 64-packet sliding replay window. The AEAD tag has
+// already been verified when this is called.
+func (s *Session) acceptCounter(ctr uint64) bool {
+	s.recvMu.Lock()
+	defer s.recvMu.Unlock()
+
+	if ctr > s.recvMax {
+		shift := ctr - s.recvMax
+		if shift >= replayWindowBits {
+			s.recvWindow = 0
+		} else {
+			s.recvWindow <<= shift
+		}
+		s.recvWindow |= 1
+		s.recvMax = ctr
+		return true
+	}
+
+	diff := s.recvMax - ctr
+	if diff >= replayWindowBits {
+		return false
+	}
+	mask := uint64(1) << diff
+	if s.recvWindow&mask != 0 {
+		return false
+	}
+	s.recvWindow |= mask
+	return true
 }

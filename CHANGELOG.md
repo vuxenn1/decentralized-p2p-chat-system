@@ -31,6 +31,10 @@ All notable changes to the public core are documented here. The project does not
 - Per-session chat sequence numbers and delivery acknowledgements.
 - Strict receive ordering. Duplicate and out-of-order chat messages are rejected.
 - Android build script for both supported ABIs.
+- A 64-packet sliding replay window at the session layer. Limited reordering is accepted and duplicates are rejected.
+- Web demo support for connection requests, peer history, saved peers, offline peers, reconnect status and backend errors.
+- A `to` field on web messages so own messages are routed to the correct conversation.
+- CLI messages are now broadcast to web and Flutter clients.
 
 ### Changed
 
