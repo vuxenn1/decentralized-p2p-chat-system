@@ -28,6 +28,9 @@ All notable changes to the public core are documented here. The project does not
 - Protocol v2 envelope package with validation and tests.
 - Draft protocol v2 specification.
 - Ed25519 identity binding in the application-layer handshake. Each side signs a transcript containing both ephemeral keys and both identity keys.
+- Per-session chat sequence numbers and delivery acknowledgements.
+- Strict receive ordering. Duplicate and out-of-order chat messages are rejected.
+- Android build script for both supported ABIs.
 
 ### Changed
 

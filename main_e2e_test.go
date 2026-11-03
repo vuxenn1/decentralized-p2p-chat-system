@@ -168,6 +168,33 @@ func TestProtocolV2ChatAndControl(t *testing.T) {
 		return err == nil && len(messages) == 2
 	})
 
+	smB.mu.RLock()
+	receivedSequence := smB.recvSeq[hA.ID()]
+	smB.mu.RUnlock()
+	if receivedSequence != 2 {
+		t.Fatalf("unexpected receive sequence: %d", receivedSequence)
+	}
+
+	smA.mu.RLock()
+	stream := smA.streams[hB.ID()]
+	session := smA.sessions[hB.ID()]
+	smA.mu.RUnlock()
+	gapEnvelope, err := smA.newChatEnvelope(hB.ID(), 4, "out-of-order")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := smA.sendEnvelope(stream, session, gapEnvelope); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(200 * time.Millisecond)
+
+	smB.mu.RLock()
+	receivedSequence = smB.recvSeq[hA.ID()]
+	smB.mu.RUnlock()
+	if receivedSequence != 2 {
+		t.Fatalf("out-of-order message changed the receive sequence to %d", receivedSequence)
+	}
+
 	messages, err := smB.historyStore.LoadHistory(hA.ID().String())
 	if err != nil {
 		t.Fatal(err)

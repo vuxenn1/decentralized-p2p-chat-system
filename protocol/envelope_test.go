@@ -8,12 +8,15 @@ import (
 )
 
 func TestRoundTripChat(t *testing.T) {
-	envelope, err := New(TypeChat, "conversation-1", "peer-1", map[string]string{"text": "hello"})
+	envelope, err := NewChat("conversation-1", "peer-1", 1, map[string]string{"text": "hello"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if envelope.ID == "" {
 		t.Fatal("expected a generated id")
+	}
+	if envelope.Sequence != 1 {
+		t.Fatalf("unexpected sequence: %d", envelope.Sequence)
 	}
 	if envelope.Timestamp <= 0 {
 		t.Fatal("expected a positive timestamp")
@@ -57,14 +60,20 @@ func TestNewRejectsUnknownType(t *testing.T) {
 }
 
 func TestNewRejectsChatWithoutConversation(t *testing.T) {
-	if _, err := New(TypeChat, "", "peer-1", nil); err == nil {
+	if _, err := NewChat("", "peer-1", 1, nil); err == nil {
 		t.Fatal("expected a chat envelope without a conversation to be rejected")
 	}
 }
 
 func TestNewRejectsChatWithoutSender(t *testing.T) {
-	if _, err := New(TypeChat, "conversation-1", "", nil); err == nil {
+	if _, err := NewChat("conversation-1", "", 1, nil); err == nil {
 		t.Fatal("expected a chat envelope without a sender to be rejected")
+	}
+}
+
+func TestNewRejectsChatWithoutSequence(t *testing.T) {
+	if _, err := NewChat("conversation-1", "peer-1", 0, nil); err == nil {
+		t.Fatal("expected a chat envelope without a sequence to be rejected")
 	}
 }
 

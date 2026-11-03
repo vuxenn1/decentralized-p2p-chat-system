@@ -16,6 +16,9 @@ api.port
 trusted_peers.json
 history/
 
+# Release output
+dist/
+
 # Android build wrappers (contain machine-specific paths)
 clang_wrapper.py
 clang_wrapper_arm64.py

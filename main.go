@@ -62,6 +62,9 @@ type StreamManager struct {
 	activeID  peerstore.ID
 	mu        sync.RWMutex
 	writeMu   sync.Mutex
+	sendMu    sync.Mutex
+	sendSeq   map[peerstore.ID]uint64
+	recvSeq   map[peerstore.ID]uint64
 	inputChan chan string
 	node      host.Host
 	ctx       context.Context
@@ -91,6 +94,8 @@ func newStreamManager(node host.Host, ctx context.Context) *StreamManager {
 		peerNicks:          make(map[peerstore.ID]string),
 		pendingApprovals:   make(map[peerstore.ID]chan bool),
 		pendingRequestNums: make(map[int]peerstore.ID),
+		sendSeq:            make(map[peerstore.ID]uint64),
+		recvSeq:            make(map[peerstore.ID]uint64),
 	}
 }
 
@@ -130,6 +135,8 @@ func (sm *StreamManager) AddStream(s network.Stream) {
 	sm.mu.Lock()
 	sm.streams[peerID] = s
 	sm.sessions[peerID] = session
+	sm.sendSeq[peerID] = 0
+	sm.recvSeq[peerID] = 0
 
 	if sm.activeID == "" {
 		sm.activeID = peerID
@@ -268,15 +275,7 @@ func (sm *StreamManager) readLoop(s network.Stream, r *bufio.Reader) {
 				fmt.Printf("Error reading from [%s]: %v\n", short, err)
 			}
 
-			sm.mu.Lock()
-			delete(sm.streams, peerID)
-			delete(sm.sessions, peerID)
-			if sm.activeID == peerID {
-				sm.activeID = ""
-			}
-			sm.mu.Unlock()
-
-			NotifyWebPeerUpdate()
+			sm.forgetPeer(peerID)
 			_ = s.Close()
 			return
 		}
@@ -287,6 +286,7 @@ func (sm *StreamManager) readLoop(s network.Stream, r *bufio.Reader) {
 		if session == nil {
 			fmt.Printf("Session state lost for [%s]\n", short)
 			_ = s.Close()
+			sm.forgetPeer(peerID)
 			return
 		}
 
@@ -302,6 +302,19 @@ func (sm *StreamManager) readLoop(s network.Stream, r *bufio.Reader) {
 		}
 		sm.handleEnvelope(peerID, envelope)
 	}
+}
+
+func (sm *StreamManager) forgetPeer(peerID peerstore.ID) {
+	sm.mu.Lock()
+	delete(sm.streams, peerID)
+	delete(sm.sessions, peerID)
+	delete(sm.sendSeq, peerID)
+	delete(sm.recvSeq, peerID)
+	if sm.activeID == peerID {
+		sm.activeID = ""
+	}
+	sm.mu.Unlock()
+	NotifyWebPeerUpdate()
 }
 
 func (sm *StreamManager) displayName(peerID peerstore.ID) (nick string, shortID string) {
@@ -336,13 +349,7 @@ func (sm *StreamManager) HandleInput() {
 		envelope, err := sm.sendChat(activeID, text)
 		if err != nil {
 			fmt.Printf("Error, message sending to peer: %v\n", err)
-			sm.mu.Lock()
-			delete(sm.streams, activeID)
-			delete(sm.sessions, activeID)
-			if sm.activeID == activeID {
-				sm.activeID = ""
-			}
-			sm.mu.Unlock()
+			sm.forgetPeer(activeID)
 			continue
 		}
 

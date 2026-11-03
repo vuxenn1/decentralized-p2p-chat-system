@@ -37,6 +37,10 @@ type controlBody struct {
 	Index     int    `json:"index,omitempty"`
 }
 
+type ackBody struct {
+	ID string `json:"id"`
+}
+
 // conversationID returns a stable identifier for a one-to-one conversation.
 // Both peers compute the same value regardless of who initiated the stream.
 func conversationID(first, second peerstore.ID) string {
@@ -46,12 +50,12 @@ func conversationID(first, second peerstore.ID) string {
 	return base64.RawURLEncoding.EncodeToString(sum[:16])
 }
 
-func (sm *StreamManager) newChatEnvelope(remote peerstore.ID, text string) (*protocol.Envelope, error) {
+func (sm *StreamManager) newChatEnvelope(remote peerstore.ID, sequence uint64, text string) (*protocol.Envelope, error) {
 	if sm.node == nil {
 		return nil, errors.New("node is not initialized")
 	}
 	local := sm.node.ID()
-	return protocol.New(protocol.TypeChat, conversationID(local, remote), local.String(), chatBody{Text: text})
+	return protocol.NewChat(conversationID(local, remote), local.String(), sequence, chatBody{Text: text})
 }
 
 func (sm *StreamManager) newControlEnvelope(remote peerstore.ID, body controlBody) (*protocol.Envelope, error) {
@@ -60,6 +64,14 @@ func (sm *StreamManager) newControlEnvelope(remote peerstore.ID, body controlBod
 	}
 	local := sm.node.ID()
 	return protocol.New(protocol.TypeControl, conversationID(local, remote), local.String(), body)
+}
+
+func (sm *StreamManager) newAckEnvelope(remote peerstore.ID, messageID string) (*protocol.Envelope, error) {
+	if sm.node == nil {
+		return nil, errors.New("node is not initialized")
+	}
+	local := sm.node.ID()
+	return protocol.New(protocol.TypeAck, conversationID(local, remote), local.String(), ackBody{ID: messageID})
 }
 
 func (sm *StreamManager) sendEnvelope(stream network.Stream, session *security.Session, envelope *protocol.Envelope) error {
@@ -90,7 +102,17 @@ func (sm *StreamManager) sendChat(remote peerstore.ID, text string) (*protocol.E
 		return nil, errors.New("peer is not connected")
 	}
 
-	envelope, err := sm.newChatEnvelope(remote, text)
+	// Serialize chat sequence assignment and the frame write so the receiver
+	// sees sequence numbers in the same order they were assigned.
+	sm.sendMu.Lock()
+	defer sm.sendMu.Unlock()
+
+	sm.mu.Lock()
+	sequence := sm.sendSeq[remote] + 1
+	sm.sendSeq[remote] = sequence
+	sm.mu.Unlock()
+
+	envelope, err := sm.newChatEnvelope(remote, sequence, text)
 	if err != nil {
 		return nil, err
 	}
@@ -111,6 +133,23 @@ func (sm *StreamManager) sendControl(remote peerstore.ID, body controlBody) erro
 	}
 
 	envelope, err := sm.newControlEnvelope(remote, body)
+	if err != nil {
+		return err
+	}
+	return sm.sendEnvelope(stream, session, envelope)
+}
+
+func (sm *StreamManager) sendAck(remote peerstore.ID, messageID string) error {
+	sm.mu.RLock()
+	stream, hasStream := sm.streams[remote]
+	session, hasSession := sm.sessions[remote]
+	sm.mu.RUnlock()
+
+	if !hasStream || !hasSession {
+		return errors.New("peer is not connected")
+	}
+
+	envelope, err := sm.newAckEnvelope(remote, messageID)
 	if err != nil {
 		return err
 	}
@@ -140,6 +179,22 @@ func (sm *StreamManager) handleEnvelope(peerID peerstore.ID, envelope *protocol.
 		if strings.TrimSpace(body.Text) == "" {
 			return
 		}
+
+		sm.mu.Lock()
+		last := sm.recvSeq[peerID]
+		if envelope.Sequence != last+1 {
+			sm.mu.Unlock()
+			fmt.Printf("Rejected out-of-order chat from [%s]: got %d, expected %d\n",
+				peerID, envelope.Sequence, last+1)
+			return
+		}
+		sm.recvSeq[peerID] = envelope.Sequence
+		sm.mu.Unlock()
+
+		if err := sm.sendAck(peerID, envelope.ID); err != nil {
+			fmt.Printf("Failed to send ack to [%s]: %v\n", peerID, err)
+		}
+
 		nick, shortID := sm.displayName(peerID)
 		display := shortID
 		if nick != "" {
@@ -150,6 +205,14 @@ func (sm *StreamManager) handleEnvelope(peerID peerstore.ID, envelope *protocol.
 			colorize(96, display),
 			body.Text)
 		NotifyWebMessage(peerID.String(), display, body.Text, false)
+
+	case protocol.TypeAck:
+		var body ackBody
+		if err := json.Unmarshal(envelope.Body, &body); err != nil {
+			fmt.Printf("Invalid ack body from [%s]: %v\n", peerID, err)
+			return
+		}
+		// Acknowledgements are accepted but not surfaced to clients yet.
 
 	case protocol.TypeControl:
 		var body controlBody

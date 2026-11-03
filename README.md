@@ -33,7 +33,7 @@ The core owns identity, sessions, messaging, storage, discovery and transport. C
 
 ### Wire protocol
 
-The chat and control messages use the versioned v2 envelope in `protocol/`. The libp2p protocol ID is `/p2pchat/2`. Connection approval still uses a separate pre-handshake line. The application-layer handshake signs a transcript with the peer Ed25519 identity and verifies it against the libp2p public key. libp2p Noise remains the transport trust anchor.
+The chat and control messages use the versioned v2 envelope in `protocol/`. The libp2p protocol ID is `/p2pchat/2`. Chat messages carry a per-session sequence number and are acknowledged by the receiver. Connection approval still uses a separate pre-handshake line. The application-layer handshake signs a transcript with the peer Ed25519 identity and verifies it against the libp2p public key. libp2p Noise remains the transport trust anchor.
 
 Two clients exist:
 
@@ -110,6 +110,18 @@ go vet ./...
 ```
 
 The security and storage packages contain focused tests for replay handling, direction separation, reflection rejection, path traversal and corrupt-file behavior.
+
+## Android binaries
+
+The private Flutter app embeds the core as an Android native binary. On Windows, build both ABIs with:
+
+```powershell
+powershell -File scripts/build-android.ps1
+```
+
+The script writes `dist/android/arm64-v8a/libp2pchat.so` and `dist/android/x86_64/libp2pchat.so`. It requires the Android NDK. Set `ANDROID_NDK_HOME` or install the NDK under `%LOCALAPPDATA%\Android\Sdk\ndk`.
+
+The build uses `-ldflags="-s -w -checklinkname=0"`. The `checklinkname=0` flag is required because `github.com/wlynxg/anet` uses `go:linkname` for Android interface discovery.
 
 ## Repository layout
 

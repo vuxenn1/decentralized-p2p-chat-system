@@ -51,6 +51,7 @@ type Envelope struct {
 	Conversation string          `json:"conv,omitempty"`
 	Sender       string          `json:"from,omitempty"`
 	Timestamp    int64           `json:"ts"`
+	Sequence     uint64          `json:"seq,omitempty"`
 	Body         json.RawMessage `json:"body,omitempty"`
 }
 
@@ -64,7 +65,17 @@ func NewID() (string, error) {
 }
 
 // New builds and validates an envelope with a generated ID and current time.
+// Chat messages must use NewChat so a sequence number can be supplied.
 func New(typ MessageType, conversation, sender string, body any) (*Envelope, error) {
+	return newEnvelope(typ, conversation, sender, 0, body)
+}
+
+// NewChat builds a chat envelope with a positive per-session sequence number.
+func NewChat(conversation, sender string, sequence uint64, body any) (*Envelope, error) {
+	return newEnvelope(TypeChat, conversation, sender, sequence, body)
+}
+
+func newEnvelope(typ MessageType, conversation, sender string, sequence uint64, body any) (*Envelope, error) {
 	id, err := NewID()
 	if err != nil {
 		return nil, err
@@ -86,6 +97,7 @@ func New(typ MessageType, conversation, sender string, body any) (*Envelope, err
 		Conversation: conversation,
 		Sender:       sender,
 		Timestamp:    time.Now().UnixMilli(),
+		Sequence:     sequence,
 		Body:         raw,
 	}
 	if err := envelope.Validate(); err != nil {
@@ -132,6 +144,9 @@ func (e *Envelope) Validate() error {
 	}
 	if e.Type == TypeChat && (e.Conversation == "" || e.Sender == "") {
 		return fmt.Errorf("chat envelope requires conversation and sender")
+	}
+	if e.Type == TypeChat && e.Sequence == 0 {
+		return fmt.Errorf("chat envelope requires a sequence")
 	}
 	if len(e.Body) > MaxBodySize {
 		return fmt.Errorf("body is too large")
