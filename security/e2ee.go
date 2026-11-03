@@ -11,10 +11,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
 
+	libp2pcrypto "github.com/libp2p/go-libp2p/core/crypto"
 	"golang.org/x/crypto/chacha20poly1305"
 	"golang.org/x/crypto/curve25519"
 	"golang.org/x/crypto/hkdf"
@@ -63,18 +65,22 @@ type Session struct {
 	recvLast uint64
 }
 
-// Handshake performs an X25519 key exchange and derives direction-separated
-// ChaCha20-Poly1305 keys.
+// Handshake performs an authenticated X25519 key exchange and derives
+// direction-separated ChaCha20-Poly1305 keys.
+//
+// Each side signs a transcript that contains both ephemeral X25519 keys and
+// both long-term identity public keys. The remote signature is verified with
+// the public key obtained from the libp2p connection. This binds the
+// application session to the peer identity.
 //
 // The returned reader must be used by the caller for the rest of the stream.
 // Creating a second bufio.Reader after the handshake can silently swallow
 // bytes that arrived together with the peer's public key.
-//
-// Authentication note: this handshake does not sign the ephemeral keys with
-// the peer's long-term identity. Peer authentication is provided by the
-// libp2p Noise/TLS transport. Binding this handshake to the peer identity is
-// planned for the protocol v2 work.
-func Handshake(rw io.ReadWriter) (*Session, *bufio.Reader, error) {
+func Handshake(rw io.ReadWriter, localIdentity libp2pcrypto.PrivKey, remoteIdentity libp2pcrypto.PubKey) (*Session, *bufio.Reader, error) {
+	if localIdentity == nil || remoteIdentity == nil {
+		return nil, nil, errors.New("identity key is missing")
+	}
+
 	var priv [32]byte
 	if _, err := rand.Read(priv[:]); err != nil {
 		return nil, nil, err
@@ -111,11 +117,43 @@ func Handshake(rw io.ReadWriter) (*Session, *bufio.Reader, error) {
 		return nil, nil, err
 	}
 
-	lowToHighKey, err := deriveKey(shared, "p2pchat-v1-low-to-high")
+	transcript, err := handshakeTranscript(pub, peerPub, localIdentity.GetPublic(), remoteIdentity)
 	if err != nil {
 		return nil, nil, err
 	}
-	highToLowKey, err := deriveKey(shared, "p2pchat-v1-high-to-low")
+
+	signature, err := localIdentity.Sign(transcript)
+	if err != nil {
+		return nil, nil, fmt.Errorf("sign handshake transcript: %w", err)
+	}
+	if _, err := writer.WriteString(base64.StdEncoding.EncodeToString(signature) + "\n"); err != nil {
+		return nil, nil, err
+	}
+	if err := writer.Flush(); err != nil {
+		return nil, nil, err
+	}
+
+	peerSignatureLine, err := reader.ReadString('\n')
+	if err != nil {
+		return nil, nil, err
+	}
+	peerSignature, err := base64.StdEncoding.DecodeString(strings.TrimSpace(peerSignatureLine))
+	if err != nil || len(peerSignature) == 0 {
+		return nil, nil, errors.New("invalid peer signature")
+	}
+	verified, err := remoteIdentity.Verify(transcript, peerSignature)
+	if err != nil {
+		return nil, nil, fmt.Errorf("verify peer signature: %w", err)
+	}
+	if !verified {
+		return nil, nil, errors.New("peer identity verification failed")
+	}
+
+	lowToHighKey, err := deriveKey(shared, transcript, "p2pchat-v2-low-to-high")
+	if err != nil {
+		return nil, nil, err
+	}
+	highToLowKey, err := deriveKey(shared, transcript, "p2pchat-v2-high-to-low")
 	if err != nil {
 		return nil, nil, err
 	}
@@ -150,8 +188,37 @@ func Handshake(rw io.ReadWriter) (*Session, *bufio.Reader, error) {
 	return session, reader, nil
 }
 
-func deriveKey(shared []byte, info string) ([]byte, error) {
-	h := hkdf.New(sha256.New, shared, nil, []byte(info))
+func handshakeTranscript(localEphemeral, remoteEphemeral []byte, localIdentity, remoteIdentity libp2pcrypto.PubKey) ([]byte, error) {
+	localID, err := localIdentity.Raw()
+	if err != nil {
+		return nil, fmt.Errorf("marshal local identity: %w", err)
+	}
+	remoteID, err := remoteIdentity.Raw()
+	if err != nil {
+		return nil, fmt.Errorf("marshal remote identity: %w", err)
+	}
+
+	ephemerals := [][]byte{localEphemeral, remoteEphemeral}
+	sort.Slice(ephemerals, func(i, j int) bool {
+		return bytes.Compare(ephemerals[i], ephemerals[j]) < 0
+	})
+
+	identities := [][]byte{localID, remoteID}
+	sort.Slice(identities, func(i, j int) bool {
+		return bytes.Compare(identities[i], identities[j]) < 0
+	})
+
+	return bytes.Join([][]byte{
+		[]byte("p2pchat-handshake-v2"),
+		ephemerals[0],
+		ephemerals[1],
+		identities[0],
+		identities[1],
+	}, []byte("|")), nil
+}
+
+func deriveKey(shared, transcript []byte, info string) ([]byte, error) {
+	h := hkdf.New(sha256.New, shared, transcript, []byte(info))
 	key := make([]byte, keySize)
 	if _, err := io.ReadFull(h, key); err != nil {
 		return nil, fmt.Errorf("hkdf: %w", err)

@@ -113,8 +113,16 @@ func (sm *StreamManager) getSortedPeers() []peerstore.ID {
 func (sm *StreamManager) AddStream(s network.Stream) {
 	peerID := s.Conn().RemotePeer()
 
-	session, reader, err := security.Handshake(s)
+	if sm.node == nil {
+		_ = s.Close()
+		return
+	}
+	localIdentity := sm.node.Peerstore().PrivKey(sm.node.ID())
+	remoteIdentity := s.Conn().RemotePublicKey()
+
+	session, reader, err := security.Handshake(s, localIdentity, remoteIdentity)
 	if err != nil {
+		fmt.Printf("Handshake with [%s] failed: %v\n", peerID, err)
 		_ = s.Close()
 		return
 	}

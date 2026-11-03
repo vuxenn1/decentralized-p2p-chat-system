@@ -53,7 +53,7 @@ Current mitigation:
 
 Residual risk:
 
-- The application-layer handshake does not independently sign the ephemeral keys with the Ed25519 identity. If the transport authentication is removed or bypassed, the application layer alone is vulnerable to MITM.
+- The application-layer handshake signs the transcript with the Ed25519 identity and verifies the remote libp2p public key. Formal verification is still pending.
 - Replay handling assumes ordered delivery; out-of-order packets are rejected.
 - No formal verification yet.
 
@@ -188,7 +188,7 @@ Residual risk:
 
 ## 7. Open items
 
-1. Bind the application-layer handshake to the Ed25519 identity (protocol v2).
+1. Add formal verification for the handshake transcript and state machine.
 2. Remove in-band control messages.
 3. Add read deadlines, line limits, connection limits and rate limiting.
 4. Move the local API to IPC.

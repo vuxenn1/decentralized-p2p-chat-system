@@ -1,6 +1,6 @@
 # Protocol v2 Draft
 
-**Status:** Draft. The envelope is integrated for chat, nickname, latency and concurrent-test control messages. Connection approval still uses the legacy pre-handshake line. Identity binding is pending.
+**Status:** Draft. The envelope is integrated for chat, nickname, latency and concurrent-test control messages. Connection approval still uses the legacy pre-handshake line. Identity binding is implemented at the handshake layer.
 
 ## Goals
 
@@ -8,7 +8,7 @@
 - Explicit message types instead of string prefixes.
 - Size limits before parsing.
 - A stable contract for the core, the web demo and the private Flutter app.
-- Room for acknowledgements, ordering and identity binding.
+- Room for acknowledgements and ordering.
 
 ## Envelope
 
@@ -111,7 +111,7 @@ The receiver verifies that the envelope sender matches the remote peer ID of the
 
 - The envelope does not replace transport encryption. libp2p Noise remains the transport trust anchor.
 - The application-layer session binds the envelope to direction-separated keys.
-- The draft does not yet bind the envelope to the Ed25519 identity. That step is required before the protocol can be called independently authenticated.
+- The handshake signs a transcript containing both ephemeral keys and both identity keys. The envelope is bound to the resulting session keys.
 - Replay handling belongs to the session layer and uses a monotonic counter.
 - All identifiers and sizes must be validated before use.
 

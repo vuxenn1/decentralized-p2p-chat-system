@@ -25,8 +25,9 @@ All notable changes to the public core are documented here. The project does not
 - GitHub Actions CI for vet, race tests, build and web syntax check.
 - MIT license.
 - Optional `--web` flag for the browser demo. The local API remains available without it.
-- Protocol v2 envelope package with validation and tests. The envelope is not wired into the message loop yet.
+- Protocol v2 envelope package with validation and tests.
 - Draft protocol v2 specification.
+- Ed25519 identity binding in the application-layer handshake. Each side signs a transcript containing both ephemeral keys and both identity keys.
 
 ### Changed
 

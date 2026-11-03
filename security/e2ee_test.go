@@ -1,7 +1,6 @@
 package security
 
 import (
-	"bufio"
 	"crypto/rand"
 	"encoding/base64"
 	"net"
@@ -9,12 +8,24 @@ import (
 	"testing"
 	"time"
 
-	"golang.org/x/crypto/curve25519"
+	libp2pcrypto "github.com/libp2p/go-libp2p/core/crypto"
 )
+
+func generateIdentity(t *testing.T) (libp2pcrypto.PrivKey, libp2pcrypto.PubKey) {
+	t.Helper()
+	priv, pub, err := libp2pcrypto.GenerateEd25519Key(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return priv, pub
+}
 
 // pair performs a real on-the-wire handshake over loopback TCP.
 func pair(t *testing.T) (*Session, *Session) {
 	t.Helper()
+
+	alicePriv, alicePub := generateIdentity(t)
+	bobPriv, bobPub := generateIdentity(t)
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -35,7 +46,7 @@ func pair(t *testing.T) (*Session, *Session) {
 			return
 		}
 		defer conn.Close()
-		session, _, err := Handshake(conn)
+		session, _, err := Handshake(conn, bobPriv, alicePub)
 		serverCh <- result{session: session, err: err}
 	}()
 
@@ -45,7 +56,7 @@ func pair(t *testing.T) (*Session, *Session) {
 	}
 	defer clientConn.Close()
 
-	clientSession, _, err := Handshake(clientConn)
+	clientSession, _, err := Handshake(clientConn, alicePriv, bobPub)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -162,30 +173,36 @@ func TestOutOfOrderCounterRejected(t *testing.T) {
 // second bufio.Reader can silently discard bytes that arrived together with
 // the peer's public key.
 func TestHandshakeReaderKeepsFollowingData(t *testing.T) {
+	serverPriv, serverPub := generateIdentity(t)
+	clientPriv, clientPub := generateIdentity(t)
+
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer ln.Close()
 
-	serverCh := make(chan error, 1)
-	serverReaderCh := make(chan *bufio.Reader, 1)
+	type result struct {
+		line string
+		err  error
+	}
+	serverCh := make(chan result, 1)
 
 	go func() {
 		conn, err := ln.Accept()
 		if err != nil {
-			serverCh <- err
+			serverCh <- result{err: err}
 			return
 		}
 		defer conn.Close()
 
-		_, reader, err := Handshake(conn)
+		_, reader, err := Handshake(conn, serverPriv, clientPub)
 		if err != nil {
-			serverCh <- err
+			serverCh <- result{err: err}
 			return
 		}
-		serverReaderCh <- reader
-		serverCh <- nil
+		line, err := reader.ReadString('\n')
+		serverCh <- result{line: line, err: err}
 	}()
 
 	clientConn, err := net.Dial("tcp", ln.Addr().String())
@@ -194,36 +211,66 @@ func TestHandshakeReaderKeepsFollowingData(t *testing.T) {
 	}
 	defer clientConn.Close()
 
-	clientReader := bufio.NewReader(clientConn)
-	if _, err := clientReader.ReadString('\n'); err != nil {
+	if _, _, err := Handshake(clientConn, clientPriv, serverPub); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := clientConn.Write([]byte("EXTRA\n")); err != nil {
 		t.Fatal(err)
 	}
 
-	var priv [32]byte
-	if _, err := rand.Read(priv[:]); err != nil {
-		t.Fatal(err)
+	select {
+	case result := <-serverCh:
+		if result.err != nil {
+			t.Fatalf("handshake reader lost following data: %v", result.err)
+		}
+		if strings.TrimSpace(result.line) != "EXTRA" {
+			t.Fatalf("unexpected buffered line: %q", result.line)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for the server reader")
 	}
-	pub, err := curve25519.X25519(priv[:], curve25519.Basepoint)
+}
+
+func TestHandshakeRejectsWrongIdentity(t *testing.T) {
+	serverPriv, serverPub := generateIdentity(t)
+	clientPriv, _ := generateIdentity(t)
+	_, wrongPub := generateIdentity(t)
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer ln.Close()
 
-	payload := base64.StdEncoding.EncodeToString(pub) + "\nEXTRA\n"
-	if _, err := clientConn.Write([]byte(payload)); err != nil {
-		t.Fatal(err)
-	}
+	serverErrCh := make(chan error, 1)
 
-	if err := <-serverCh; err != nil {
-		t.Fatal(err)
-	}
-	reader := <-serverReaderCh
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			serverErrCh <- err
+			return
+		}
+		defer conn.Close()
+		_, _, err = Handshake(conn, serverPriv, wrongPub)
+		serverErrCh <- err
+	}()
 
-	_ = clientConn.SetReadDeadline(time.Now().Add(2 * time.Second))
-	line, err := reader.ReadString('\n')
+	clientConn, err := net.Dial("tcp", ln.Addr().String())
 	if err != nil {
-		t.Fatalf("handshake reader lost buffered data: %v", err)
+		t.Fatal(err)
 	}
-	if strings.TrimSpace(line) != "EXTRA" {
-		t.Fatalf("unexpected buffered line: %q", line)
+	defer clientConn.Close()
+
+	// The client may fail after the server closes the stream. The server
+	// error is the property under test.
+	_, _, _ = Handshake(clientConn, clientPriv, serverPub)
+
+	select {
+	case err := <-serverErrCh:
+		if err == nil {
+			t.Fatal("server accepted a signature from the wrong identity")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for the server handshake")
 	}
 }
