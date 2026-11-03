@@ -545,7 +545,7 @@ func (sm *StreamManager) runLatencyTest(size string) {
 		return
 	}
 
-	fmt.Printf("Starting latency test [%s] — 100 messages...\n", size)
+	fmt.Printf("Starting latency test [%s] - 100 messages...\n", size)
 
 	for i := 1; i <= 100; i++ {
 		ts := time.Now().UnixMilli()
@@ -574,7 +574,7 @@ func (sm *StreamManager) runConcurrentTest() {
 		return
 	}
 
-	fmt.Printf("Starting concurrent test — %d peers, 20 messages each...\n", len(peers))
+	fmt.Printf("Starting concurrent test - %d peers, 20 messages each...\n", len(peers))
 
 	var wg sync.WaitGroup
 	for _, pid := range peers {
@@ -1122,6 +1122,7 @@ func main() {
 	identityName := flag.String("identity", "", "Identity name for testing")
 	dataDir := flag.String("datadir", "", "Data directory for storage (used on Android)")
 	listenIP := flag.String("listenip", "", "Specific IP to listen on (used on Android for LAN)")
+	webUI := flag.Bool("web", false, "Serve the local web demo on 127.0.0.1:9090")
 	flag.Parse()
 
 	resolvedDataDir := *dataDir
@@ -1169,7 +1170,7 @@ func main() {
 		}
 	}
 
-	go StartWebServer(sm, resolvedDataDir)
+	go StartWebServer(sm, resolvedDataDir, *webUI)
 
 	fmt.Println(colorize(95, "Initializing DHT..."))
 	dhtService, err := discovery.NewDHTService(ctx, node)

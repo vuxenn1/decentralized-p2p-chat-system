@@ -56,7 +56,7 @@ type WSMessage struct {
 
 var webClient *WebClient
 
-func StartWebServer(sm *StreamManager, dataDir string) {
+func StartWebServer(sm *StreamManager, dataDir string, serveUI bool) {
 	listener, err := net.Listen("tcp", "127.0.0.1:9090")
 	if err != nil {
 		fmt.Printf("Listener error: %v\n", err)
@@ -96,9 +96,15 @@ func StartWebServer(sm *StreamManager, dataDir string) {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", handleWebSocket)
-	mux.Handle("/", http.FileServer(http.Dir(webRoot)))
-
-	fmt.Printf("\nWeb interface: %s\n\n", colorize(92, fmt.Sprintf("http://127.0.0.1:%d/#token=%s", port, token)))
+	if serveUI {
+		mux.Handle("/", http.FileServer(http.Dir(webRoot)))
+		fmt.Printf("\nWeb interface: %s\n\n", colorize(92, fmt.Sprintf("http://127.0.0.1:%d/#token=%s", port, token)))
+	} else {
+		mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+			http.Error(w, "web UI disabled; start the core with --web to enable it", http.StatusNotFound)
+		})
+		fmt.Printf("Local API listening on 127.0.0.1:%d (web UI disabled; use --web to enable)\n", port)
+	}
 
 	go http.Serve(listener, mux)
 }

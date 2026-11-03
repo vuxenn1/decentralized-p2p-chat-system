@@ -41,7 +41,7 @@ var (
 // Session holds the encryption state for one peer connection.
 //
 // The handshake derives two independent keys: one for the low-key side to
-// send to the high-key side, and one for the reverse direction. The direction
+// send to the high-key side and one for the reverse direction. The direction
 // is also encoded in the nonce, so a packet cannot be reflected back to its
 // sender even if a key were reused by mistake.
 //

@@ -3,7 +3,7 @@
 **Status:** Draft for Stage 0
 **Last updated:** 2026-11-03
 
-This document describes the assets, adversaries, trust boundaries, and mitigations for the public core. It is intentionally conservative: if a property is not tested or enforced in code, it is listed as a residual risk.
+This document describes the assets, adversaries, trust boundaries and mitigations for the public core. It is intentionally conservative: if a property is not tested or enforced in code, it is listed as a residual risk.
 
 ## 1. Assets
 
@@ -33,13 +33,13 @@ Current mitigation:
 
 Residual risk:
 
-- IP addresses, peer IDs, timing, and message sizes are visible.
+- IP addresses, peer IDs, timing and message sizes are visible.
 - Public DHT advertisements reveal online peers and addresses.
 - A relay, if added later, sees metadata.
 
 ### B. Active network attacker / MITM
 
-Capabilities: can intercept, drop, delay, replay, or inject packets.
+Capabilities: can intercept, drop, delay, replay or inject packets.
 
 Goals: impersonate a peer, read or modify messages, cause denial of service.
 
@@ -59,9 +59,9 @@ Residual risk:
 
 ### C. Malicious peer
 
-Capabilities: can complete a connection, send arbitrary bytes, open many streams, and send malformed input.
+Capabilities: can complete a connection, send arbitrary bytes, open many streams and send malformed input.
 
-Goals: crash the process, exhaust resources, spoof a nickname, inject control messages, or cause data loss.
+Goals: crash the process, exhaust resources, spoof a nickname, inject control messages or cause data loss.
 
 Current mitigation:
 
@@ -74,7 +74,7 @@ Current mitigation:
 
 Residual risk:
 
-- No rate limiting, stream limits, read deadlines, or maximum line length yet.
+- No rate limiting, stream limits, read deadlines or maximum line length yet.
 - In-band control messages still exist in the application protocol; the protocol v2 work will remove them.
 - A peer can choose any nickname; nicknames are not identities.
 - A peer can send a `LATENCY_PING`-style message if the legacy control path remains.
@@ -82,7 +82,7 @@ Residual risk:
 
 ### D. Local attacker / malicious application
 
-Capabilities: another app on the same Android device, another user or process on a desktop, or a malicious website in the user's browser.
+Capabilities: another app on the same Android device, another user or process on a desktop or a malicious website in the user's browser.
 
 Goals: read history, send messages as the user, change settings, delete history.
 
@@ -97,12 +97,12 @@ Current mitigation:
 Residual risk:
 
 - On desktop, another process with the same user can read the token file and connect.
-- A malicious local application can bind port 9090 before the core starts; the core then fails to write credentials, and the app shows an unavailable state. This prevents silent impersonation but is still a denial of service.
+- A malicious local application can bind port 9090 before the core starts; the core then fails to write credentials and the app shows an unavailable state. This prevents silent impersonation but is still a denial of service.
 - The long-term fix is local IPC with OS-level authorization.
 
 ### E. Stolen or compromised device
 
-Capabilities: physical access, unlocked device, rooted device, or filesystem access.
+Capabilities: physical access, unlocked device, rooted device or filesystem access.
 
 Goals: recover the identity key and history.
 
@@ -120,18 +120,18 @@ Residual risk:
 
 ### F. Supply-chain attacker
 
-Capabilities: compromised dependency, build environment, or release artifact.
+Capabilities: compromised dependency, build environment or release artifact.
 
 Goals: ship a backdoored build.
 
 Current mitigation:
 
 - Go modules with checksums.
-- CI runs tests, vet, and the race detector.
+- CI runs tests, vet and the race detector.
 
 Residual risk:
 
-- No SBOM, reproducible build, signed release artifact, or dependency vulnerability scanning yet.
+- No SBOM, reproducible build, signed release artifact or dependency vulnerability scanning yet.
 - No external audit.
 
 ## 3. Trust boundaries
@@ -190,8 +190,8 @@ Residual risk:
 
 1. Bind the application-layer handshake to the Ed25519 identity (protocol v2).
 2. Remove in-band control messages.
-3. Add read deadlines, line limits, connection limits, and rate limiting.
+3. Add read deadlines, line limits, connection limits and rate limiting.
 4. Move the local API to IPC.
 5. Store identity keys in the OS keystore.
-6. Add SBOM, dependency scanning, and signed releases.
+6. Add SBOM, dependency scanning and signed releases.
 7. Revisit the threat model after every protocol change.

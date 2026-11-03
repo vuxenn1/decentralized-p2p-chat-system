@@ -12,32 +12,32 @@ Use GitHub's private vulnerability reporting for this repository. If that is una
 
 Include:
 
-- a short description,
-- affected component and version,
-- reproduction steps or a proof of concept,
-- impact assessment,
-- any suggested fix.
+- a short description
+- affected component and version
+- reproduction steps or a proof of concept
+- impact assessment
+- any suggested fix
 
-Do not test against devices, networks, or accounts you do not own or have permission to test.
+Do not test against devices, networks or accounts you do not own or have permission to test.
 
 ## Scope
 
 In scope:
 
-- the Go core in this repository,
-- the public web demo,
-- the local API and its authentication,
-- protocol, storage, and discovery code.
+- the Go core in this repository
+- the public web demo
+- the local API and its authentication
+- protocol, storage and discovery code
 
 Out of scope for this repository:
 
-- the private Flutter application,
-- third-party services and bootstrap nodes,
-- dependencies without a demonstrated impact on this project.
+- the private Flutter application
+- third-party services and bootstrap nodes
+- dependencies without a demonstrated impact on this project
 
 ## Disclosure
 
-The maintainer will acknowledge a report, investigate it, and coordinate a fix and disclosure timeline. There is no bug bounty.
+The maintainer will acknowledge a report, investigate it and coordinate a fix and disclosure timeline. There is no bug bounty.
 
 ## Supported versions
 

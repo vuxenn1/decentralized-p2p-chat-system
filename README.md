@@ -1,12 +1,12 @@
 # Ağdaş Core
 
-Ağdaş is a serverless, peer-to-peer messaging system built in Go. This repository contains the networking core, the protocol implementation, encrypted local storage, the CLI, and a browser-based demo client.
+Ağdaş is a serverless, peer-to-peer messaging system built in Go. This repository contains the networking core, the protocol implementation, encrypted local storage, the CLI and a browser-based demo client.
 
 The primary product client is a private Flutter application. It is not part of this repository.
 
 ## Status
 
-**Stabilization in progress.** The project is not production-ready. The security model is being revised, the local API is being hardened, and the protocol will move to a versioned v2 format.
+**Stabilization in progress.** The project is not production-ready. The security model is being revised, the local API is being hardened and the protocol will move to a versioned v2 format.
 
 Do not use this software for sensitive communication yet.
 
@@ -29,7 +29,7 @@ Web  ─┘          │
                  └──> encrypted local history
 ```
 
-The core owns identity, sessions, messaging, storage, discovery, and transport. Clients only talk to the core.
+The core owns identity, sessions, messaging, storage, discovery and transport. Clients only talk to the core.
 
 Two clients exist:
 
@@ -77,15 +77,23 @@ On first run, an Ed25519 identity is created under `~/.p2pchat`. Use `--datadir`
 /help                   Show all commands
 ```
 
-## Web demo
+## Web demo (optional)
 
-The core starts a local web server on `127.0.0.1:9090`. On startup it prints a URL containing a one-time access token in the URL fragment:
+The local API always listens on `127.0.0.1:9090` for native clients. The browser demo is opt-in:
+
+```bash
+go run . --identity yournick --web
+```
+
+When enabled, the core prints a URL containing a one-time access token in the URL fragment:
 
 ```text
 http://127.0.0.1:9090/#token=...
 ```
 
 Open that URL in a browser. The token is kept in `sessionStorage` and is required by the WebSocket endpoint. Opening the page without the token will not connect.
+
+Without `--web`, the API still runs on loopback and the root path returns a short "web UI disabled" response. The CLI remains the default interface.
 
 The web demo is a reference client, not the primary product. It is intentionally local-only.
 
@@ -97,7 +105,7 @@ go test ./...
 go vet ./...
 ```
 
-The security and storage packages contain focused tests for replay handling, direction separation, reflection rejection, path traversal, and corrupt-file behavior.
+The security and storage packages contain focused tests for replay handling, direction separation, reflection rejection, path traversal and corrupt-file behavior.
 
 ## Repository layout
 
@@ -107,12 +115,13 @@ web.go           local web server and WebSocket bridge
 security/        handshake and message encryption
 storage/         encrypted history and trusted peers
 discovery/       libp2p DHT discovery
+protocol/        versioned envelope for protocol v2 (draft)
 web/             browser demo client
 ```
 
 ## Roadmap
 
-The project is being stabilized before new features are added. The public roadmap covers the security baseline, protocol v2, storage redesign, Android/platform work, networking, UX, and release hardening.
+The project is being stabilized before new features are added. The public roadmap covers the security baseline, protocol v2, storage redesign, Android/platform work, networking, UX and release hardening.
 
 ## License
 
@@ -120,6 +129,6 @@ MIT. See [LICENSE](LICENSE).
 
 ## Academic notice
 
-This project started as a graduation engineering design project at Erzurum Technical University, Department of Computer Engineering, 2025–2026. It is now maintained as an independent engineering project.
+This project started as a graduation engineering design project at Erzurum Technical University, Department of Computer Engineering, 2025-2026. It is now maintained as an independent engineering project.
 
 The public core is shared for study and reuse under the MIT license. The private Flutter application remains proprietary.
