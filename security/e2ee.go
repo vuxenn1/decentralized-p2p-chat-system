@@ -2,6 +2,7 @@ package security
 
 import (
 	"bufio"
+	"bytes"
 	"crypto/cipher"
 	"crypto/rand"
 	"crypto/sha256"
@@ -19,150 +20,185 @@ import (
 	"golang.org/x/crypto/hkdf"
 )
 
+const (
+	nonceSize = chacha20poly1305.NonceSize // 12 bytes
+	keySize   = chacha20poly1305.KeySize    // 32 bytes
+
+	directionLowToHigh byte = 1
+	directionHighToLow byte = 2
+)
+
+var (
+	// ErrReplay is returned when a valid packet is received more than once
+	// or when its counter is not strictly increasing.
+	ErrReplay = errors.New("replay attack detected: nonce already used")
+
+	// ErrWrongDirection is returned when a packet was produced for the other
+	// direction of the session. This also rejects reflected packets.
+	ErrWrongDirection = errors.New("packet direction does not match session")
+)
+
 // Session holds the encryption state for one peer connection.
 //
-// Each session is established via a fresh X25519 key exchange (Handshake),
-// producing a unique shared secret that is never reused across connections.
+// The handshake derives two independent keys: one for the low-key side to
+// send to the high-key side, and one for the reverse direction. The direction
+// is also encoded in the nonce, so a packet cannot be reflected back to its
+// sender even if a key were reused by mistake.
 //
-// Outgoing messages use an incrementing nonce counter to ensure no two
-// messages share the same nonce — nonce reuse would completely break
-// ChaCha20-Poly1305 security.
-//
-// Incoming messages are tracked via receivedNonces to prevent replay attacks.
-// If a nonce is seen twice within the same session, the message is rejected.
+// Outgoing messages use an increasing counter per direction. Incoming
+// messages are accepted only after AEAD verification and only if their
+// counter is strictly greater than the last accepted counter. This makes the
+// replay check O(1) in memory and ensures a forged packet cannot consume a
+// legitimate message's nonce.
 type Session struct {
-	aead           cipher.AEAD // ChaCha20-Poly1305 cipher (encrypts + authenticates)
-	nonceCtr       uint64      // Outgoing nonce counter — increments per message
-	receivedNonces sync.Map    // Tracks received nonces to detect replayed messages
+	sendAEAD cipher.AEAD
+	recvAEAD cipher.AEAD
+
+	sendDir byte
+	recvDir byte
+
+	sendCtr uint64
+
+	recvMu   sync.Mutex
+	recvLast uint64
 }
 
-// Handshake performs an X25519 Diffie-Hellman key exchange with a peer
-// to establish a shared encryption key without transmitting it over the network.
+// Handshake performs an X25519 key exchange and derives direction-separated
+// ChaCha20-Poly1305 keys.
 //
-// Process:
-//  1. Generate a random ephemeral private key (used once, discarded after handshake)
-//  2. Derive the corresponding public key using Curve25519
-//  3. Exchange public keys with the peer over the stream
-//  4. Both sides compute the same shared secret: shared = peerPub × ourPriv
-//  5. Derive a 32-byte encryption key from the shared secret using HKDF-SHA256
-//  6. Initialize a ChaCha20-Poly1305 AEAD cipher with the derived key
+// The returned reader must be used by the caller for the rest of the stream.
+// Creating a second bufio.Reader after the handshake can silently swallow
+// bytes that arrived together with the peer's public key.
 //
-// Security properties:
-//   - Forward secrecy: ephemeral keys mean past sessions cannot be decrypted
-//     even if long-term identity keys are later compromised
-//   - Authentication: ChaCha20-Poly1305 detects any tampering with ciphertext
-//   - Key isolation: the raw shared secret is never used directly — HKDF
-//     binds it to the application context "p2pchat-password-protocol"
-func Handshake(rw io.ReadWriter) (*Session, error) {
-	// Generate 32-byte ephemeral private key
+// Authentication note: this handshake does not sign the ephemeral keys with
+// the peer's long-term identity. Peer authentication is provided by the
+// libp2p Noise/TLS transport. Binding this handshake to the peer identity is
+// planned for the protocol v2 work.
+func Handshake(rw io.ReadWriter) (*Session, *bufio.Reader, error) {
 	var priv [32]byte
 	if _, err := rand.Read(priv[:]); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
-	// Apply X25519 clamping (required by the spec for curve safety)
-	priv[0] &= 248  // Clear bottom 3 bits
-	priv[31] &= 127 // Clear top bit
-	priv[31] |= 64  // Set second-to-top bit
-
-	// Derive public key: pub = priv × BasePoint
+	// curve25519.X25519 clamps the scalar internally. Manual clamping here
+	// would be redundant.
 	pub, err := curve25519.X25519(priv[:], curve25519.Basepoint)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	reader := bufio.NewReader(rw)
 	writer := bufio.NewWriter(rw)
 
-	// Send our public key (base64 encoded, newline terminated)
 	if _, err := writer.WriteString(base64.StdEncoding.EncodeToString(pub) + "\n"); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if err := writer.Flush(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
-	// Receive peer's public key
 	peerLine, err := reader.ReadString('\n')
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	peerPub, err := base64.StdEncoding.DecodeString(strings.TrimSpace(peerLine))
 	if err != nil || len(peerPub) != 32 {
-		return nil, errors.New("invalid peer public key")
+		return nil, nil, errors.New("invalid peer public key")
 	}
 
-	// Compute shared secret: shared = peerPub × ourPriv
-	// The peer computes: shared = ourPub × theirPriv
-	// Both results are equal by Diffie-Hellman properties
 	shared, err := curve25519.X25519(priv[:], peerPub)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
-	// Derive encryption key via HKDF-SHA256
-	// This strengthens the shared secret and binds it to our application
-	h := hkdf.New(sha256.New, shared, nil, []byte("p2pchat-password-protocol"))
-	key := make([]byte, chacha20poly1305.KeySize)
-	if _, err := io.ReadFull(h, key); err != nil {
-		return nil, err
-	}
-
-	// Initialize ChaCha20-Poly1305 cipher
-	// Provides both encryption (ChaCha20) and authentication (Poly1305)
-	aead, err := chacha20poly1305.New(key)
+	lowToHighKey, err := deriveKey(shared, "p2pchat-v1-low-to-high")
 	if err != nil {
-		return nil, err
+		return nil, nil, err
+	}
+	highToLowKey, err := deriveKey(shared, "p2pchat-v1-high-to-low")
+	if err != nil {
+		return nil, nil, err
 	}
 
-	return &Session{aead: aead}, nil
+	lowToHigh, err := chacha20poly1305.New(lowToHighKey)
+	if err != nil {
+		return nil, nil, err
+	}
+	highToLow, err := chacha20poly1305.New(highToLowKey)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	session := &Session{}
+	switch bytes.Compare(pub, peerPub) {
+	case -1:
+		// This side has the lower ephemeral public key.
+		session.sendAEAD = lowToHigh
+		session.recvAEAD = highToLow
+		session.sendDir = directionLowToHigh
+		session.recvDir = directionHighToLow
+	case 1:
+		// This side has the higher ephemeral public key.
+		session.sendAEAD = highToLow
+		session.recvAEAD = lowToHigh
+		session.sendDir = directionHighToLow
+		session.recvDir = directionLowToHigh
+	default:
+		return nil, nil, errors.New("identical ephemeral public keys")
+	}
+
+	return session, reader, nil
+}
+
+func deriveKey(shared []byte, info string) ([]byte, error) {
+	h := hkdf.New(sha256.New, shared, nil, []byte(info))
+	key := make([]byte, keySize)
+	if _, err := io.ReadFull(h, key); err != nil {
+		return nil, fmt.Errorf("hkdf: %w", err)
+	}
+	return key, nil
 }
 
 // Encrypt encodes a plaintext message into an authenticated encrypted packet.
 //
-// Output format: "base64(nonce).base64(ciphertext+tag)"
-//
-// The nonce is derived from an atomic counter, guaranteeing uniqueness
-// across all messages in this session. Nonce reuse with ChaCha20-Poly1305
-// would allow key recovery — the counter approach prevents this entirely.
-//
-// The 16-byte Poly1305 authentication tag appended to the ciphertext
-// ensures any modification of the packet is detected on decryption.
+// Output format: "base64(nonce).base64(ciphertext+tag)".
+// The first nonce byte is the direction marker; the remaining bytes carry an
+// increasing 64-bit counter starting at 1.
 func (s *Session) Encrypt(plain []byte) (string, error) {
-	nonce := make([]byte, chacha20poly1305.NonceSize)
+	if s == nil || s.sendAEAD == nil {
+		return "", errors.New("session is not initialized")
+	}
 
-	// Increment counter atomically to ensure no two goroutines share a nonce
-	ctr := atomic.AddUint64(&s.nonceCtr, 1)
-	binary.LittleEndian.PutUint64(nonce[:8], ctr)
+	nonce := make([]byte, nonceSize)
+	nonce[0] = s.sendDir
+	ctr := atomic.AddUint64(&s.sendCtr, 1)
+	binary.LittleEndian.PutUint64(nonce[4:], ctr)
 
-	// Seal encrypts and authenticates: output = ciphertext || 16-byte tag
-	ct := s.aead.Seal(nil, nonce, plain, nil)
-
-	return fmt.Sprint(base64.StdEncoding.EncodeToString(nonce) + "." + base64.StdEncoding.EncodeToString(ct)), nil
+	ct := s.sendAEAD.Seal(nil, nonce, plain, nil)
+	return base64.StdEncoding.EncodeToString(nonce) + "." +
+		base64.StdEncoding.EncodeToString(ct), nil
 }
 
-// Decrypt decodes and authenticates an encrypted packet back to plaintext.
+// Decrypt verifies and decrypts a packet.
 //
-// Steps:
-//  1. Parse the "nonce.ciphertext" packet format
-//  2. Check the nonce has not been seen before (replay protection)
-//  3. Verify the Poly1305 authentication tag
-//  4. Decrypt and return plaintext
-//
-// Returns an error if:
-//   - The packet format is invalid
-//   - The nonce was already received in this session (replay attack detected)
-//   - The authentication tag does not match (tampered or corrupted packet)
-//   - Decryption fails for any other reason
+// The AEAD tag is verified before the replay check. A forged or corrupted
+// packet therefore cannot mark a legitimate packet's counter as consumed.
 func (s *Session) Decrypt(packet string) ([]byte, error) {
+	if s == nil || s.recvAEAD == nil {
+		return nil, errors.New("session is not initialized")
+	}
+
 	parts := strings.Split(packet, ".")
 	if len(parts) != 2 {
 		return nil, errors.New("invalid packet format")
 	}
 
 	nonce, err := base64.StdEncoding.DecodeString(parts[0])
-	if err != nil || len(nonce) != chacha20poly1305.NonceSize {
+	if err != nil || len(nonce) != nonceSize {
 		return nil, errors.New("invalid nonce")
+	}
+	if nonce[0] != s.recvDir {
+		return nil, ErrWrongDirection
 	}
 
 	ct, err := base64.StdEncoding.DecodeString(parts[1])
@@ -170,19 +206,18 @@ func (s *Session) Decrypt(packet string) ([]byte, error) {
 		return nil, errors.New("invalid ciphertext")
 	}
 
-	// Replay protection: reject any nonce seen before in this session
-	nonceKey := base64.StdEncoding.EncodeToString(nonce)
-	if _, alreadySeen := s.receivedNonces.LoadOrStore(nonceKey, true); alreadySeen {
-		return nil, errors.New("replay attack detected: nonce already used")
-	}
-
-	// Verify authentication tag and decrypt
-	// aead.Open returns an error if the tag does not match,
-	// meaning the packet was tampered with or corrupted
-	plain, err := s.aead.Open(nil, nonce, ct, nil)
+	plain, err := s.recvAEAD.Open(nil, nonce, ct, nil)
 	if err != nil {
 		return nil, errors.New("decrypt/auth failed")
 	}
+
+	ctr := binary.LittleEndian.Uint64(nonce[4:])
+	s.recvMu.Lock()
+	defer s.recvMu.Unlock()
+	if ctr <= s.recvLast {
+		return nil, ErrReplay
+	}
+	s.recvLast = ctr
 
 	return plain, nil
 }

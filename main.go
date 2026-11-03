@@ -114,7 +114,7 @@ func (sm *StreamManager) getSortedPeers() []peerstore.ID {
 func (sm *StreamManager) AddStream(s network.Stream) {
 	peerID := s.Conn().RemotePeer()
 
-	session, err := security.Handshake(s)
+	session, reader, err := security.Handshake(s)
 	if err != nil {
 		_ = s.Close()
 		return
@@ -129,9 +129,8 @@ func (sm *StreamManager) AddStream(s network.Stream) {
 	}
 	sm.mu.Unlock()
 
-	go sm.readLoop(s)
+	go sm.readLoop(s, reader)
 
-	time.Sleep(10 * time.Millisecond)
 	if sm.localNick != "" {
 		enc, err := session.Encrypt([]byte(NickPrefix + sm.localNick))
 		if err == nil {
@@ -241,7 +240,7 @@ func (sm *StreamManager) RespondToConnectionRequestByNum(num int, accepted bool)
 	}
 }
 
-func (sm *StreamManager) readLoop(s network.Stream) {
+func (sm *StreamManager) readLoop(s network.Stream, r *bufio.Reader) {
 	peerID := s.Conn().RemotePeer()
 	remote := peerID.String()
 	short := remote
@@ -249,7 +248,6 @@ func (sm *StreamManager) readLoop(s network.Stream) {
 		short = remote[len(remote)-8:]
 	}
 
-	r := bufio.NewReader(s)
 	for {
 		line, err := r.ReadString('\n')
 		if err != nil {
@@ -1171,7 +1169,7 @@ func main() {
 		}
 	}
 
-	go StartWebServer(sm)
+	go StartWebServer(sm, resolvedDataDir)
 
 	fmt.Println(colorize(95, "Initializing DHT..."))
 	dhtService, err := discovery.NewDHTService(ctx, node)

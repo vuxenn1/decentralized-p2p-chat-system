@@ -11,6 +11,10 @@ p2p-chat
 # User data - never commit identity keys or message history
 .p2pchat/
 *.key
+api.token
+api.port
+trusted_peers.json
+history/
 
 # Android build wrappers (contain machine-specific paths)
 clang_wrapper.py

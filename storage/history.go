@@ -66,8 +66,22 @@ func (h *HistoryStore) deriveKey(peerID string) ([]byte, error) {
 // filePath returns the path for a peer's history file.
 // Uses the full peer ID as filename (safe characters only).
 func (h *HistoryStore) filePath(peerID string) string {
-	// Peer IDs contain only alphanumeric + base58 chars, safe for filenames
 	return filepath.Join(h.dataDir, peerID+".enc")
+}
+
+// validatePeerID rejects path separators and traversal components. Peer IDs
+// are expected to be opaque identifiers, not filesystem paths.
+func validatePeerID(peerID string) error {
+	if peerID == "" {
+		return fmt.Errorf("empty peer id")
+	}
+	if peerID == "." || peerID == ".." {
+		return fmt.Errorf("invalid peer id %q", peerID)
+	}
+	if strings.ContainsAny(peerID, `/\`) || strings.Contains(peerID, "..") {
+		return fmt.Errorf("invalid peer id %q", peerID)
+	}
+	return nil
 }
 
 // SaveMessage appends one message to a peer's encrypted history file.
@@ -75,7 +89,18 @@ func (h *HistoryStore) SaveMessage(peerID string, msg StoredMsg) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
-	msgs, _ := h.readFile(peerID) // ignore error — start fresh if missing/corrupt
+	if err := validatePeerID(peerID); err != nil {
+		return err
+	}
+
+	msgs, err := h.readFile(peerID)
+	if err != nil {
+		// Do not overwrite an unreadable history file. The previous
+		// implementation ignored this error and silently replaced the entire
+		// conversation with a single message.
+		return fmt.Errorf("read existing history: %w", err)
+	}
+
 	msgs = append(msgs, msg)
 	return h.writeFile(peerID, msgs)
 }
@@ -121,6 +146,10 @@ func (h *HistoryStore) LoadAllHistories() (map[string][]StoredMsg, error) {
 
 // readFile decrypts and parses the history file for a peer.
 func (h *HistoryStore) readFile(peerID string) ([]StoredMsg, error) {
+	if err := validatePeerID(peerID); err != nil {
+		return nil, err
+	}
+
 	data, err := os.ReadFile(h.filePath(peerID))
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -159,6 +188,10 @@ func (h *HistoryStore) readFile(peerID string) ([]StoredMsg, error) {
 
 // writeFile encrypts and writes the full message list for a peer.
 func (h *HistoryStore) writeFile(peerID string, msgs []StoredMsg) error {
+	if err := validatePeerID(peerID); err != nil {
+		return err
+	}
+
 	plain, err := json.Marshal(msgs)
 	if err != nil {
 		return fmt.Errorf("marshal: %w", err)
@@ -181,13 +214,41 @@ func (h *HistoryStore) writeFile(peerID string, msgs []StoredMsg) error {
 
 	// File format: nonce || ciphertext
 	out := aead.Seal(nonce, nonce, plain, nil)
-	return os.WriteFile(h.filePath(peerID), out, 0600)
+
+	tmp, err := os.CreateTemp(h.dataDir, peerID+".tmp-*")
+	if err != nil {
+		return fmt.Errorf("create temp file: %w", err)
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+
+	if _, err := tmp.Write(out); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("write temp file: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("sync temp file: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close temp file: %w", err)
+	}
+
+	if err := os.Rename(tmpName, h.filePath(peerID)); err != nil {
+		return fmt.Errorf("replace history file: %w", err)
+	}
+	return nil
 }
 
 // ClearHistory deletes the history file for a peer.
 func (h *HistoryStore) ClearHistory(peerID string) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+
+	if err := validatePeerID(peerID); err != nil {
+		return err
+	}
+
 	err := os.Remove(h.filePath(peerID))
 	if os.IsNotExist(err) {
 		return nil

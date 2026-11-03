@@ -5,10 +5,39 @@ const messagesByPeer = {};
 const qs = id => document.getElementById(id);
 
 // =====================
+// ACCESS TOKEN
+// =====================
+// The Go backend prints a URL with the token in the fragment:
+//   http://127.0.0.1:9090/#token=...
+// The fragment never leaves the browser, so the token is not sent to the
+// static file server. It is kept in sessionStorage for reconnects.
+function readToken() {
+    const params = new URLSearchParams(location.hash.replace(/^#/, ''));
+    const fromHash = params.get('token');
+    if (fromHash) {
+        sessionStorage.setItem('agdas_token', fromHash);
+        return fromHash;
+    }
+    return sessionStorage.getItem('agdas_token') || '';
+}
+
+const apiToken = readToken();
+
+function wsURL() {
+    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+    return `${proto}://${location.host}/ws?token=${encodeURIComponent(apiToken)}`;
+}
+
+// =====================
 // WEBSOCKET CONNECTION
 // =====================
 function connectWS() {
-    ws = new WebSocket(`ws://${location.host}/ws`);
+    if (!apiToken) {
+        showDiscoveryStatus('Missing access token. Open the URL printed in the terminal.');
+        return;
+    }
+
+    ws = new WebSocket(wsURL());
 
     ws.onopen = () => {
         console.log('WebSocket connected');
@@ -27,6 +56,10 @@ function connectWS() {
         console.log('WebSocket disconnected, reconnecting...');
         setTimeout(connectWS, 3000);
     };
+}
+
+function wsReady() {
+    return ws && ws.readyState === WebSocket.OPEN;
 }
 
 function handleWebSocketMessage(m) {
@@ -78,38 +111,52 @@ function showDiscoveryStatus(text) {
 function addDiscoveredPeer(peer) {
     const section = qs("discoveredSection");
     const list = qs("discoveredList");
-    
+
     section.style.display = "block";
-    
+
+    const shortId = peer.id.substring(peer.id.length - 8);
+
     const item = document.createElement("div");
     item.className = "discovered-peer-item";
-    
-    const shortId = peer.id.substring(peer.id.length - 8);
-    
-    item.innerHTML = `
-        <div class="discovered-peer-info">
-            <div class="discovered-peer-name">Peer ${shortId}</div>
-            <div class="discovered-peer-addr">${peer.address}</div>
-        </div>
-        <button class="btn btn-connect" onclick="connectToDiscoveredPeer('${peer.address}')">Connect</button>
-    `;
-    
+
+    const info = document.createElement("div");
+    info.className = "discovered-peer-info";
+
+    const name = document.createElement("div");
+    name.className = "discovered-peer-name";
+    name.textContent = `Peer ${shortId}`;
+
+    const addr = document.createElement("div");
+    addr.className = "discovered-peer-addr";
+    addr.textContent = peer.address;
+
+    info.append(name, addr);
+
+    const button = document.createElement("button");
+    button.className = "btn btn-connect";
+    button.textContent = "Connect";
+    button.addEventListener("click", () => connectToDiscoveredPeer(peer.address));
+
+    item.append(info, button);
     list.appendChild(item);
 }
 
 function connectToDiscoveredPeer(address) {
     const confirmed = confirm(`Do you want to connect to this peer?\n\n${address}`);
-    
     if (!confirmed) return;
-    
+
+    if (!wsReady()) {
+        showDiscoveryStatus("Not connected to the local backend.");
+        return;
+    }
+
     ws.send(JSON.stringify({
         type: "connect_peer",
         payload: { address: address }
     }));
-    
+
     showDiscoveryStatus("Connecting to peer...");
-    
-    // Clear discovered list after connecting
+
     setTimeout(() => {
         qs("discoveredList").innerHTML = "";
         qs("discoveredSection").style.display = "none";
@@ -146,23 +193,29 @@ function renderPeers(peers) {
             d.classList.add("active");
         }
 
-        d.innerHTML = `
-            <div class="peer-name">${p.nickname}</div>
-            <div class="peer-id">${p.shortId}</div>
-        `;
+        const name = document.createElement("div");
+        name.className = "peer-name";
+        name.textContent = p.nickname;
 
-        d.onclick = () => openPeer(p.id, p.nickname);
+        const id = document.createElement("div");
+        id.className = "peer-id";
+        id.textContent = p.shortId;
+
+        d.append(name, id);
+        d.onclick = () => openPeer(p.id, p.nickname, d);
         list.appendChild(d);
     });
 }
 
-function openPeer(id, name) {
+function openPeer(id, name, element) {
     activePeer = id;
 
-    // Update UI
-    const peerItems = document.querySelectorAll('.peer-item');
-    peerItems.forEach(item => item.classList.remove('active'));
-    event.currentTarget.classList.add('active');
+    document.querySelectorAll('.peer-item').forEach(item => {
+        item.classList.remove('active');
+    });
+    if (element) {
+        element.classList.add('active');
+    }
 
     qs("chatTitle").textContent = `Chat with ${name}`;
     qs("messageInput").disabled = false;
@@ -176,6 +229,8 @@ function openPeer(id, name) {
 // =====================
 function storeMessage(m) {
     const pid = m.isOwn ? activePeer : m.from;
+
+    if (!pid) return;
 
     if (!messagesByPeer[pid]) {
         messagesByPeer[pid] = [];
@@ -215,32 +270,37 @@ function renderMessages() {
 
         const displayName = m.isOwn ? "You" : m.fromName;
 
-        d.innerHTML = `
-            <div class="msg-header">${displayName}</div>
-            <div class="msg-content">${escapeHtml(m.content)}</div>
-            <div class="msg-time">${time}</div>
-        `;
+        const header = document.createElement("div");
+        header.className = "msg-header";
+        header.textContent = displayName;
 
+        const content = document.createElement("div");
+        content.className = "msg-content";
+        content.textContent = m.content;
+
+        const timeEl = document.createElement("div");
+        timeEl.className = "msg-time";
+        timeEl.textContent = time;
+
+        d.append(header, content, timeEl);
         box.appendChild(d);
     });
 
     box.scrollTop = box.scrollHeight;
 }
 
-function escapeHtml(text) {
-    const div = document.createElement('div');
-    div.textContent = text;
-    return div.innerHTML;
-}
-
 // =====================
 // BUTTON ACTIONS
 // =====================
 qs("discoverBtn").onclick = () => {
-    // Clear previous discoveries
+    if (!wsReady()) {
+        showDiscoveryStatus("Not connected to the local backend.");
+        return;
+    }
+
     qs("discoveredList").innerHTML = "";
     qs("discoveredSection").style.display = "none";
-    
+
     ws.send(JSON.stringify({ type: "discover_peers" }));
     showDiscoveryStatus("Starting discovery...");
 };
@@ -264,6 +324,11 @@ function sendMessage() {
 
     if (!content) return;
 
+    if (!wsReady()) {
+        showDiscoveryStatus("Not connected to the local backend.");
+        return;
+    }
+
     ws.send(JSON.stringify({
         type: "send_message",
         payload: {
@@ -279,6 +344,11 @@ qs("connectBtn").onclick = () => {
     const addr = prompt("Enter peer multiaddress:\n\nExample:\n/ip4/192.168.1.100/tcp/12345/p2p/...");
 
     if (!addr) return;
+
+    if (!wsReady()) {
+        showDiscoveryStatus("Not connected to the local backend.");
+        return;
+    }
 
     ws.send(JSON.stringify({
         type: "connect_peer",

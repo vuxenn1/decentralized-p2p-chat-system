@@ -1,11 +1,16 @@
 package main
 
 import (
+	"crypto/rand"
+	"crypto/subtle"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
+	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"time"
 
@@ -19,7 +24,7 @@ import (
 
 var wsUpgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool {
-		return true
+		return false
 	},
 }
 
@@ -32,6 +37,7 @@ type WebClient struct {
 	messagesMu      sync.RWMutex
 	pendingRequests []map[string]string
 	pendingReqMu    sync.Mutex
+	token           string
 }
 
 type WebMsg struct {
@@ -50,18 +56,39 @@ type WSMessage struct {
 
 var webClient *WebClient
 
-func StartWebServer(sm *StreamManager) {
+func StartWebServer(sm *StreamManager, dataDir string) {
+	listener, err := net.Listen("tcp", "127.0.0.1:9090")
+	if err != nil {
+		fmt.Printf("Listener error: %v\n", err)
+		return
+	}
+
+	token, err := newAPIToken()
+	if err != nil {
+		_ = listener.Close()
+		fmt.Printf("Failed to generate API token: %v\n", err)
+		return
+	}
+
+	port := listener.Addr().(*net.TCPAddr).Port
 	webClient = &WebClient{
 		sm:              sm,
 		clients:         make(map[*websocket.Conn]bool),
 		writeMu:         make(map[*websocket.Conn]*sync.Mutex),
 		messages:        make([]WebMsg, 0),
 		pendingRequests: make([]map[string]string, 0),
+		token:           token,
 	}
 
-	listener, err := net.Listen("tcp", ":9090")
-	if err != nil {
-		fmt.Printf("Listener error: %v\n", err)
+	wsUpgrader = websocket.Upgrader{
+		CheckOrigin: func(r *http.Request) bool {
+			return originAllowed(r, port)
+		},
+	}
+
+	if err := writeAPIConfig(dataDir, port, token); err != nil {
+		_ = listener.Close()
+		fmt.Printf("Failed to write API credentials: %v\n", err)
 		return
 	}
 
@@ -71,12 +98,57 @@ func StartWebServer(sm *StreamManager) {
 	mux.HandleFunc("/ws", handleWebSocket)
 	mux.Handle("/", http.FileServer(http.Dir(webRoot)))
 
-	fmt.Printf("\nWeb interface: %s\n\n", colorize(92, "http://localhost:9090"))
+	fmt.Printf("\nWeb interface: %s\n\n", colorize(92, fmt.Sprintf("http://127.0.0.1:%d/#token=%s", port, token)))
 
 	go http.Serve(listener, mux)
 }
 
+func newAPIToken() (string, error) {
+	raw := make([]byte, 32)
+	if _, err := rand.Read(raw); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(raw), nil
+}
+
+func writeAPIConfig(dataDir string, port int, token string) error {
+	if dataDir == "" {
+		return fmt.Errorf("empty data directory")
+	}
+	if err := os.MkdirAll(dataDir, 0700); err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(dataDir, "api.token"), []byte(token+"\n"), 0600); err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(dataDir, "api.port"), []byte(strconv.Itoa(port)+"\n"), 0600)
+}
+
+func originAllowed(r *http.Request, port int) bool {
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		// Native clients (such as the Flutter app) do not send an Origin
+		// header. They still have to present a valid token.
+		return true
+	}
+	return origin == fmt.Sprintf("http://127.0.0.1:%d", port) ||
+		origin == fmt.Sprintf("http://localhost:%d", port)
+}
+
+func (wc *WebClient) authorized(r *http.Request) bool {
+	if wc == nil || wc.token == "" {
+		return false
+	}
+	provided := r.URL.Query().Get("token")
+	return subtle.ConstantTimeCompare([]byte(provided), []byte(wc.token)) == 1
+}
+
 func handleWebSocket(w http.ResponseWriter, r *http.Request) {
+	if !webClient.authorized(r) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
 	conn, err := wsUpgrader.Upgrade(w, r, nil)
 	if err != nil {
 		return
@@ -164,8 +236,13 @@ func (wc *WebClient) handleWSMessage(msg WSMessage) {
 		}
 		json.Unmarshal(msg.Payload, &p)
 		if wc.sm.peerStore != nil && p.PeerID != "" {
-			wc.sm.peerStore.SavePeer(p.PeerID, p.Nickname)
-			NotifyTrustedPeersUpdate(wc.sm.peerStore)
+			pid, err := peerstore.Decode(p.PeerID)
+			if err != nil {
+				return
+			}
+			if err := wc.sm.peerStore.SavePeer(pid.String(), p.Nickname); err == nil {
+				NotifyTrustedPeersUpdate(wc.sm.peerStore)
+			}
 		}
 
 	case "remove_peer":
@@ -174,8 +251,13 @@ func (wc *WebClient) handleWSMessage(msg WSMessage) {
 		}
 		json.Unmarshal(msg.Payload, &p)
 		if wc.sm.peerStore != nil && p.PeerID != "" {
-			wc.sm.peerStore.RemovePeerByID(p.PeerID)
-			NotifyTrustedPeersUpdate(wc.sm.peerStore)
+			pid, err := peerstore.Decode(p.PeerID)
+			if err != nil {
+				return
+			}
+			if err := wc.sm.peerStore.RemovePeerByID(pid.String()); err == nil {
+				NotifyTrustedPeersUpdate(wc.sm.peerStore)
+			}
 		}
 
 	case "clear_history":
@@ -184,7 +266,11 @@ func (wc *WebClient) handleWSMessage(msg WSMessage) {
 		}
 		json.Unmarshal(msg.Payload, &p)
 		if wc.sm.historyStore != nil && p.PeerID != "" {
-			wc.sm.historyStore.ClearHistory(p.PeerID)
+			pid, err := peerstore.Decode(p.PeerID)
+			if err != nil {
+				return
+			}
+			_ = wc.sm.historyStore.ClearHistory(pid.String())
 		}
 	}
 }
