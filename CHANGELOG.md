@@ -29,9 +29,11 @@ All notable changes to the public core are documented here. The project does not
 - Draft protocol v2 specification.
 - Ed25519 identity binding in the application-layer handshake. Each side signs a transcript containing both ephemeral keys and both identity keys.
 - Per-session chat sequence numbers and delivery acknowledgements.
-- Strict receive ordering. Duplicate and out-of-order chat messages are rejected.
+- Duplicate chat messages are rejected and acknowledged. Out-of-order messages are buffered within a 64-message limit and delivered in order after a gap is filled.
 - Android build script for both supported ABIs.
 - A 64-packet sliding replay window at the session layer. Limited reordering is accepted and duplicates are rejected.
+- Sender retransmission for unacknowledged chat messages.
+- Receiver buffering for out-of-order chat messages, with ordered delivery after a gap is filled.
 - Web demo support for connection requests, peer history, saved peers, offline peers, reconnect status and backend errors.
 - A `to` field on web messages so own messages are routed to the correct conversation.
 - CLI messages are now broadcast to web and Flutter clients.

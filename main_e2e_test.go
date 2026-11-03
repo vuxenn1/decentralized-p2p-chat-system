@@ -175,11 +175,15 @@ func TestProtocolV2ChatAndControl(t *testing.T) {
 		t.Fatalf("unexpected receive sequence: %d", receivedSequence)
 	}
 
+	waitFor(t, "chat acknowledgements", 5*time.Second, func() bool {
+		return smA.pendingCount(hB.ID()) == 0
+	})
+
 	smA.mu.RLock()
 	stream := smA.streams[hB.ID()]
 	session := smA.sessions[hB.ID()]
 	smA.mu.RUnlock()
-	gapEnvelope, err := smA.newChatEnvelope(hB.ID(), 4, "out-of-order")
+	gapEnvelope, err := smA.newChatEnvelope(hB.ID(), 4, "four")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -192,15 +196,50 @@ func TestProtocolV2ChatAndControl(t *testing.T) {
 	receivedSequence = smB.recvSeq[hA.ID()]
 	smB.mu.RUnlock()
 	if receivedSequence != 2 {
-		t.Fatalf("out-of-order message changed the receive sequence to %d", receivedSequence)
+		t.Fatalf("buffered message changed the receive sequence to %d", receivedSequence)
 	}
+
+	fillEnvelope, err := smA.newChatEnvelope(hB.ID(), 3, "three")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := smA.sendEnvelope(stream, session, fillEnvelope); err != nil {
+		t.Fatal(err)
+	}
+
+	waitFor(t, "buffered messages delivered", 5*time.Second, func() bool {
+		smB.mu.RLock()
+		defer smB.mu.RUnlock()
+		return smB.recvSeq[hA.ID()] == 4
+	})
+
+	fake.messagesMu.RLock()
+	lastMessages := fake.messages[len(fake.messages)-2:]
+	if len(lastMessages) != 2 ||
+		lastMessages[0].Content != "three" ||
+		lastMessages[1].Content != "four" {
+		fake.messagesMu.RUnlock()
+		t.Fatalf("buffered messages were not delivered in order: %+v", lastMessages)
+	}
+	fake.messagesMu.RUnlock()
+
+	waitFor(t, "stored chat messages", 5*time.Second, func() bool {
+		messages, err := smB.historyStore.LoadHistory(hA.ID().String())
+		return err == nil && len(messages) == 4
+	})
 
 	messages, err := smB.historyStore.LoadHistory(hA.ID().String())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(messages) != 2 {
-		t.Fatalf("expected 2 stored chat messages, got %d", len(messages))
+	contents := make(map[string]bool)
+	for _, message := range messages {
+		contents[message.Content] = true
+	}
+	for _, expected := range []string{"three", "four"} {
+		if !contents[expected] {
+			t.Fatalf("missing buffered message %q", expected)
+		}
 	}
 	for _, message := range messages {
 		if message.Content == "LATENCY_PING" || message.Content == "CONCURRENT_TEST" {

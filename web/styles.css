@@ -690,3 +690,9 @@ body {
     background: #16a34a;
 }
 
+
+.row-actions {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}

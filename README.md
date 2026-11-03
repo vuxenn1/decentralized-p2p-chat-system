@@ -33,7 +33,7 @@ The core owns identity, sessions, messaging, storage, discovery and transport. C
 
 ### Wire protocol
 
-The chat and control messages use the versioned v2 envelope in `protocol/`. The libp2p protocol ID is `/p2pchat/2`. Chat messages carry a per-session sequence number and are acknowledged by the receiver. Connection approval still uses a separate pre-handshake line. The application-layer handshake signs a transcript with the peer Ed25519 identity and verifies it against the libp2p public key. libp2p Noise remains the transport trust anchor.
+The chat and control messages use the versioned v2 envelope in `protocol/`. The libp2p protocol ID is `/p2pchat/2`. Chat messages carry a per-session sequence number and are acknowledged by the receiver. Unacknowledged messages are retried and limited out-of-order messages are buffered until the gap is filled. Connection approval still uses a separate pre-handshake line. The application-layer handshake signs a transcript with the peer Ed25519 identity and verifies it against the libp2p public key. libp2p Noise remains the transport trust anchor.
 
 Two clients exist:
 

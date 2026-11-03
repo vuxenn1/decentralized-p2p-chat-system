@@ -406,7 +406,27 @@ function renderTrusted() {
             setStatus("Saved peer removed");
         };
 
-        row.append(dot, meta, remove);
+        const actions = document.createElement("div");
+        actions.className = "row-actions";
+
+        if (!isConnected(peer.peerId)) {
+            const reconnect = document.createElement("button");
+            reconnect.className = "btn btn-small";
+            reconnect.textContent = "Reconnect";
+            reconnect.onclick = event => {
+                event.stopPropagation();
+                if (!wsReady()) return;
+                ws.send(JSON.stringify({
+                    type: "reconnect_peer",
+                    payload: { peerId: peer.peerId }
+                }));
+                setStatus("Reconnecting...");
+            };
+            actions.append(reconnect);
+        }
+        actions.append(remove);
+
+        row.append(dot, meta, actions);
         row.onclick = () => openPeer(peer.peerId, name.textContent);
         list.appendChild(row);
     });

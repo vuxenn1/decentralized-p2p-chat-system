@@ -41,6 +41,18 @@ type ackBody struct {
 	ID string `json:"id"`
 }
 
+type pendingChat struct {
+	envelope *protocol.Envelope
+	lastSent time.Time
+	attempts int
+}
+
+const (
+	maxReceiveBuffer  = 64
+	pendingTimeout    = 2 * time.Second
+	maxPendingRetries = 5
+)
+
 // conversationID returns a stable identifier for a one-to-one conversation.
 // Both peers compute the same value regardless of who initiated the stream.
 func conversationID(first, second peerstore.ID) string {
@@ -116,7 +128,12 @@ func (sm *StreamManager) sendChat(remote peerstore.ID, text string) (*protocol.E
 	if err != nil {
 		return nil, err
 	}
+
+	// Track before writing so an acknowledgement that arrives immediately is
+	// not lost.
+	sm.trackPending(remote, envelope)
 	if err := sm.sendEnvelope(stream, session, envelope); err != nil {
+		sm.ackPending(remote, envelope.ID)
 		return nil, err
 	}
 	return envelope, nil
@@ -156,6 +173,117 @@ func (sm *StreamManager) sendAck(remote peerstore.ID, messageID string) error {
 	return sm.sendEnvelope(stream, session, envelope)
 }
 
+func (sm *StreamManager) trackPending(remote peerstore.ID, envelope *protocol.Envelope) {
+	sm.pendingMu.Lock()
+	defer sm.pendingMu.Unlock()
+
+	messages := sm.pending[remote]
+	if messages == nil {
+		messages = make(map[string]*pendingChat)
+		sm.pending[remote] = messages
+	}
+	messages[envelope.ID] = &pendingChat{
+		envelope: envelope,
+		lastSent: time.Now(),
+		attempts: 1,
+	}
+}
+
+func (sm *StreamManager) ackPending(remote peerstore.ID, messageID string) {
+	sm.pendingMu.Lock()
+	defer sm.pendingMu.Unlock()
+
+	messages := sm.pending[remote]
+	if messages == nil {
+		return
+	}
+	delete(messages, messageID)
+	if len(messages) == 0 {
+		delete(sm.pending, remote)
+	}
+}
+
+func (sm *StreamManager) clearPending(remote peerstore.ID) {
+	sm.pendingMu.Lock()
+	defer sm.pendingMu.Unlock()
+	delete(sm.pending, remote)
+}
+
+func (sm *StreamManager) pendingCount(remote peerstore.ID) int {
+	sm.pendingMu.Lock()
+	defer sm.pendingMu.Unlock()
+	return len(sm.pending[remote])
+}
+
+func (sm *StreamManager) retransmitLoop() {
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			sm.retransmitDue()
+		case <-sm.ctx.Done():
+			return
+		}
+	}
+}
+
+func (sm *StreamManager) retransmitDue() {
+	type item struct {
+		peer    peerstore.ID
+		message *pendingChat
+	}
+
+	now := time.Now()
+	due := make([]item, 0)
+
+	sm.pendingMu.Lock()
+	for remote, messages := range sm.pending {
+		for _, message := range messages {
+			if now.Sub(message.lastSent) >= pendingTimeout {
+				due = append(due, item{peer: remote, message: message})
+			}
+		}
+	}
+	sm.pendingMu.Unlock()
+
+	for _, pending := range due {
+		sm.mu.RLock()
+		stream, hasStream := sm.streams[pending.peer]
+		session, hasSession := sm.sessions[pending.peer]
+		sm.mu.RUnlock()
+
+		if !hasStream || !hasSession {
+			continue
+		}
+
+		err := sm.sendEnvelope(stream, session, pending.message.envelope)
+
+		sm.pendingMu.Lock()
+		messages := sm.pending[pending.peer]
+		current, stillPending := messages[pending.message.envelope.ID]
+		if !stillPending || current != pending.message {
+			sm.pendingMu.Unlock()
+			continue
+		}
+
+		if err != nil || current.attempts >= maxPendingRetries {
+			delete(messages, pending.message.envelope.ID)
+			if len(messages) == 0 {
+				delete(sm.pending, pending.peer)
+			}
+			sm.pendingMu.Unlock()
+			NotifyWebError("Message delivery failed")
+			continue
+		}
+
+		current.attempts++
+		current.lastSent = now
+		sm.pendingMu.Unlock()
+	}
+}
+
 func (sm *StreamManager) handleEnvelope(peerID peerstore.ID, envelope *protocol.Envelope) {
 	if sm.node == nil {
 		return
@@ -182,29 +310,37 @@ func (sm *StreamManager) handleEnvelope(peerID peerstore.ID, envelope *protocol.
 
 		sm.mu.Lock()
 		last := sm.recvSeq[peerID]
-		if envelope.Sequence != last+1 {
+		if envelope.Sequence <= last {
 			sm.mu.Unlock()
-			fmt.Printf("Rejected out-of-order chat from [%s]: got %d, expected %d\n",
-				peerID, envelope.Sequence, last+1)
+			_ = sm.sendAck(peerID, envelope.ID)
 			return
 		}
+		if envelope.Sequence > last+1 {
+			buffer := sm.recvBuffer[peerID]
+			if buffer == nil {
+				buffer = make(map[uint64]*protocol.Envelope)
+				sm.recvBuffer[peerID] = buffer
+			}
+			if len(buffer) >= maxReceiveBuffer {
+				sm.mu.Unlock()
+				fmt.Printf("Receive buffer is full for [%s]\n", peerID)
+				return
+			}
+			buffer[envelope.Sequence] = envelope
+			sm.mu.Unlock()
+			_ = sm.sendAck(peerID, envelope.ID)
+			return
+		}
+
 		sm.recvSeq[peerID] = envelope.Sequence
 		sm.mu.Unlock()
 
+		sm.deliverChat(peerID, body.Text)
 		if err := sm.sendAck(peerID, envelope.ID); err != nil {
 			fmt.Printf("Failed to send ack to [%s]: %v\n", peerID, err)
 		}
 
-		nick, shortID := sm.displayName(peerID)
-		display := shortID
-		if nick != "" {
-			display = nick
-		}
-		fmt.Printf("[%s] [%s]: %s\n",
-			colorize(93, time.Now().Format("15:04")),
-			colorize(96, display),
-			body.Text)
-		NotifyWebMessage(peerID.String(), display, body.Text, false, peerID.String(), true)
+		sm.drainReceiveBuffer(peerID)
 
 	case protocol.TypeAck:
 		var body ackBody
@@ -212,7 +348,7 @@ func (sm *StreamManager) handleEnvelope(peerID peerstore.ID, envelope *protocol.
 			fmt.Printf("Invalid ack body from [%s]: %v\n", peerID, err)
 			return
 		}
-		// Acknowledgements are accepted but not surfaced to clients yet.
+		sm.ackPending(peerID, body.ID)
 
 	case protocol.TypeControl:
 		var body controlBody
@@ -228,6 +364,50 @@ func (sm *StreamManager) handleEnvelope(peerID peerstore.ID, envelope *protocol.
 	default:
 		// Acknowledgements, typing indicators and presence are reserved for
 		// later protocol steps.
+	}
+}
+
+func (sm *StreamManager) deliverChat(peerID peerstore.ID, text string) {
+	nick, shortID := sm.displayName(peerID)
+	display := shortID
+	if nick != "" {
+		display = nick
+	}
+	fmt.Printf("[%s] [%s]: %s\n",
+		colorize(93, time.Now().Format("15:04")),
+		colorize(96, display),
+		text)
+	NotifyWebMessage(peerID.String(), display, text, false, peerID.String(), true)
+}
+
+func (sm *StreamManager) drainReceiveBuffer(peerID peerstore.ID) {
+	for {
+		sm.mu.Lock()
+		next := sm.recvSeq[peerID] + 1
+		envelope, ok := sm.recvBuffer[peerID][next]
+		if ok {
+			delete(sm.recvBuffer[peerID], next)
+			sm.recvSeq[peerID] = next
+		}
+		sm.mu.Unlock()
+
+		if !ok {
+			return
+		}
+
+		var body chatBody
+		if err := json.Unmarshal(envelope.Body, &body); err != nil {
+			fmt.Printf("Invalid buffered chat body from [%s]: %v\n", peerID, err)
+			continue
+		}
+		if strings.TrimSpace(body.Text) == "" {
+			continue
+		}
+
+		sm.deliverChat(peerID, body.Text)
+		if err := sm.sendAck(peerID, envelope.ID); err != nil {
+			fmt.Printf("Failed to send ack to [%s]: %v\n", peerID, err)
+		}
 	}
 }
 

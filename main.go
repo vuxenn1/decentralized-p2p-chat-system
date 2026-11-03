@@ -58,16 +58,19 @@ func readLine(r io.Reader) (string, error) {
 }
 
 type StreamManager struct {
-	streams   map[peerstore.ID]network.Stream
-	activeID  peerstore.ID
-	mu        sync.RWMutex
-	writeMu   sync.Mutex
-	sendMu    sync.Mutex
-	sendSeq   map[peerstore.ID]uint64
-	recvSeq   map[peerstore.ID]uint64
-	inputChan chan string
-	node      host.Host
-	ctx       context.Context
+	streams    map[peerstore.ID]network.Stream
+	activeID   peerstore.ID
+	mu         sync.RWMutex
+	writeMu    sync.Mutex
+	sendMu     sync.Mutex
+	sendSeq    map[peerstore.ID]uint64
+	recvSeq    map[peerstore.ID]uint64
+	recvBuffer map[peerstore.ID]map[uint64]*protocol.Envelope
+	pendingMu  sync.Mutex
+	pending    map[peerstore.ID]map[string]*pendingChat
+	inputChan  chan string
+	node       host.Host
+	ctx        context.Context
 
 	dht      *discovery.DHTService
 	sessions map[peerstore.ID]*security.Session
@@ -96,6 +99,8 @@ func newStreamManager(node host.Host, ctx context.Context) *StreamManager {
 		pendingRequestNums: make(map[int]peerstore.ID),
 		sendSeq:            make(map[peerstore.ID]uint64),
 		recvSeq:            make(map[peerstore.ID]uint64),
+		recvBuffer:         make(map[peerstore.ID]map[uint64]*protocol.Envelope),
+		pending:            make(map[peerstore.ID]map[string]*pendingChat),
 	}
 }
 
@@ -137,6 +142,7 @@ func (sm *StreamManager) AddStream(s network.Stream) {
 	sm.sessions[peerID] = session
 	sm.sendSeq[peerID] = 0
 	sm.recvSeq[peerID] = 0
+	sm.recvBuffer[peerID] = make(map[uint64]*protocol.Envelope)
 
 	if sm.activeID == "" {
 		sm.activeID = peerID
@@ -310,10 +316,12 @@ func (sm *StreamManager) forgetPeer(peerID peerstore.ID) {
 	delete(sm.sessions, peerID)
 	delete(sm.sendSeq, peerID)
 	delete(sm.recvSeq, peerID)
+	delete(sm.recvBuffer, peerID)
 	if sm.activeID == peerID {
 		sm.activeID = ""
 	}
 	sm.mu.Unlock()
+	sm.clearPending(peerID)
 
 	nick, shortID := sm.displayName(peerID)
 	NotifyPeerDisconnected(peerID.String(), nick, shortID)
@@ -1108,6 +1116,7 @@ func main() {
 	defer node.Close()
 
 	sm.node = node
+	go sm.retransmitLoop()
 
 	privKeyBytes, pkErr := node.Peerstore().PrivKey(node.ID()).Raw()
 	if pkErr == nil {

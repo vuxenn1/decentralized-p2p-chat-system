@@ -24,7 +24,7 @@ import (
 
 const (
 	nonceSize = chacha20poly1305.NonceSize // 12 bytes
-	keySize   = chacha20poly1305.KeySize    // 32 bytes
+	keySize   = chacha20poly1305.KeySize   // 32 bytes
 
 	directionLowToHigh byte = 1
 	directionHighToLow byte = 2

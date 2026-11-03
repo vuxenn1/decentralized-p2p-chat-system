@@ -75,6 +75,7 @@ Current mitigation:
 Residual risk:
 
 - No rate limiting, stream limits, read deadlines or maximum line length yet.
+- The receiver buffers at most 64 out-of-order chat messages per peer. When the buffer is full, further out-of-order messages are dropped and can only be recovered by a new stream.
 - In-band control messages still exist in the application protocol; the protocol v2 work will remove them.
 - A peer can choose any nickname; nicknames are not identities.
 - A peer can send a `LATENCY_PING`-style message if the legacy control path remains.

@@ -106,11 +106,13 @@ The receiver sends an ack for every accepted chat message. Acks are not persiste
 ## Ordering and acknowledgements
 
 - Each stream starts with sequence number 1 for each sender.
-- The receiver accepts a chat message only when its sequence is exactly one greater than the last accepted sequence.
-- Duplicate and out-of-order chat messages are rejected.
-- A new stream resets both sequence counters.
+- The receiver delivers a chat message when its sequence is exactly one greater than the last delivered sequence.
+- A message with a higher sequence is buffered, acknowledged and delivered when the gap is filled. The buffer limit is 64 messages.
+- Duplicate chat messages are acknowledged and dropped.
+- A new stream resets both sequence counters and the receive buffer.
+- The sender tracks unacknowledged chat messages and retries them after two seconds. It gives up after five attempts and reports a delivery error to the client.
 - TCP already preserves byte order. The sequence check guards against missing messages and prepares the protocol for transports that can reorder.
-- The current implementation does not retransmit a missing message. A gap blocks later chat messages until the stream is re-established. Retransmission is future work.
+- If a missing message is never recovered, buffered messages remain stuck. A negative acknowledgement and a recovery policy are future work.
 
 ## Conversation identifier
 
