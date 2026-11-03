@@ -7,25 +7,75 @@ let pendingRequests = [];
 const offlinePeers = new Map();
 const messagesByPeer = {};
 
+let verifiedPeers = new Set();
+const safetyNumbers = {};
+
+let verificationPeer = null;
+let verificationVerified = false;
+
 const qs = id => document.getElementById(id);
+
+const verifyHelpDefault = "If both sides show the same number, the conversation is encrypted without a man in the middle.";
+
+// =====================
+// THEME
+// =====================
+const themeToggle = qs("themeToggle");
+
+function applyTheme(theme, persist) {
+    const next = theme === "dark" ? "dark" : "light";
+    document.documentElement.dataset.theme = next;
+    themeToggle.setAttribute(
+        "aria-label",
+        next === "dark" ? "Switch to light theme" : "Switch to dark theme"
+    );
+    if (persist) {
+        try {
+            localStorage.setItem("agdas_theme", next);
+        } catch (error) {
+            console.warn("Could not store the theme choice:", error);
+        }
+    }
+}
+
+function storedTheme() {
+    try {
+        return localStorage.getItem("agdas_theme");
+    } catch (error) {
+        return null;
+    }
+}
+
+themeToggle.addEventListener("click", () => {
+    applyTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark", true);
+});
+
+const themeMedia = window.matchMedia("(prefers-color-scheme: dark)");
+themeMedia.addEventListener("change", event => {
+    if (!storedTheme()) {
+        applyTheme(event.matches ? "dark" : "light", false);
+    }
+});
+
+applyTheme(document.documentElement.dataset.theme, false);
 
 // =====================
 // ACCESS TOKEN
 // =====================
 function readToken() {
-    const params = new URLSearchParams(location.hash.replace(/^#/, ''));
-    const fromHash = params.get('token');
+    const params = new URLSearchParams(location.hash.replace(/^#/, ""));
+    const fromHash = params.get("token");
     if (fromHash) {
-        sessionStorage.setItem('agdas_token', fromHash);
+        sessionStorage.setItem("agdas_token", fromHash);
         return fromHash;
     }
-    return sessionStorage.getItem('agdas_token') || '';
+    return sessionStorage.getItem("agdas_token") || "";
 }
 
 const apiToken = readToken();
 
 function wsURL() {
-    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+    const proto = location.protocol === "https:" ? "wss" : "ws";
     return `${proto}://${location.host}/ws?token=${encodeURIComponent(apiToken)}`;
 }
 
@@ -34,27 +84,30 @@ function wsURL() {
 // =====================
 function connectWS() {
     if (!apiToken) {
-        setStatus('Missing access token. Open the URL printed in the terminal.');
+        setStatus("Missing access token. Open the URL printed in the terminal.");
         return;
     }
 
     ws = new WebSocket(wsURL());
 
     ws.onopen = () => {
-        console.log('WebSocket connected');
+        console.log("WebSocket connected");
     };
 
-    ws.onmessage = e => {
-        const message = JSON.parse(e.data);
-        handleWebSocketMessage(message);
+    ws.onmessage = event => {
+        try {
+            handleWebSocketMessage(JSON.parse(event.data));
+        } catch (error) {
+            console.error("Could not handle a backend message:", error);
+        }
     };
 
     ws.onerror = error => {
-        console.error('WebSocket error:', error);
+        console.error("WebSocket error:", error);
     };
 
     ws.onclose = () => {
-        console.log('WebSocket disconnected, reconnecting...');
+        console.log("WebSocket disconnected, reconnecting...");
         setTimeout(connectWS, 3000);
     };
 }
@@ -74,6 +127,9 @@ function handleWebSocketMessage(message) {
         case "peers_list":
             peers = Array.isArray(message.payload) ? message.payload : [];
             peers.forEach(peer => offlinePeers.delete(peer.id));
+            if (activePeer) {
+                activePeerName = peerLabel(activePeer);
+            }
             renderPeers();
             renderOffline();
             renderTrusted();
@@ -95,7 +151,7 @@ function handleWebSocketMessage(message) {
         }
 
         case "connection_rejected":
-            setStatus('Your connection request was rejected');
+            setStatus("Your connection request was rejected");
             break;
 
         case "peer_history":
@@ -109,6 +165,45 @@ function handleWebSocketMessage(message) {
             updateActiveState();
             break;
 
+        case "verified_peers_list":
+            verifiedPeers = new Set(Array.isArray(message.payload) ? message.payload : []);
+            if (verificationPeer) {
+                verificationVerified = verifiedPeers.has(verificationPeer);
+                renderVerification();
+            }
+            renderPeers();
+            renderTrusted();
+            updateActiveState();
+            break;
+
+        case "peer_verification": {
+            const payload = message.payload || {};
+            const peerId = payload.peerId;
+            if (!peerId) break;
+
+            if (payload.safetyNumber) {
+                safetyNumbers[peerId] = payload.safetyNumber;
+            }
+            if (payload.verified) {
+                verifiedPeers.add(peerId);
+            } else {
+                verifiedPeers.delete(peerId);
+            }
+
+            if (verificationPeer === peerId) {
+                verificationVerified = Boolean(payload.verified);
+                qs("verifyHelp").textContent = payload.keyAvailable === false
+                    ? (payload.message || "The peer public key is not available yet.")
+                    : verifyHelpDefault;
+                renderVerification();
+            }
+
+            renderPeers();
+            renderTrusted();
+            updateActiveState();
+            break;
+        }
+
         case "peer_disconnected": {
             const payload = message.payload || {};
             if (payload.peerId) {
@@ -120,28 +215,29 @@ function handleWebSocketMessage(message) {
                 renderOffline();
                 renderTrusted();
                 updateActiveState();
-                setStatus(`${payload.nickname || payload.shortId || 'Peer'} went offline`);
+                setStatus(`${payload.nickname || payload.shortId || "Peer"} went offline`);
             }
             break;
         }
 
         case "reconnect_status": {
             const payload = message.payload || {};
-            if (payload.status === 'connected' && payload.peerId) {
+            if (payload.status === "connected" && payload.peerId) {
                 offlinePeers.delete(payload.peerId);
                 renderOffline();
                 renderTrusted();
+                updateActiveState();
             }
-            setStatus(payload.message || payload.status || 'Reconnect status changed');
+            setStatus(payload.message || payload.status || "Reconnect status changed");
             break;
         }
 
         case "error":
-            setStatus((message.payload && message.payload.message) || 'Backend error');
+            setStatus((message.payload && message.payload.message) || "Backend error");
             break;
 
         case "discovery_status":
-            setStatus((message.payload && message.payload.status) || '');
+            setStatus((message.payload && message.payload.status) || "");
             break;
 
         case "discovered_peer":
@@ -163,13 +259,13 @@ let statusTimer = null;
 function setStatus(text) {
     const statusEl = qs("discoveryStatus");
     statusEl.textContent = text;
-    statusEl.style.display = "block";
+    statusEl.hidden = false;
 
     if (statusTimer) {
         clearTimeout(statusTimer);
     }
     statusTimer = setTimeout(() => {
-        statusEl.style.display = "none";
+        statusEl.hidden = true;
     }, 6000);
 }
 
@@ -180,7 +276,7 @@ function addDiscoveredPeer(peer) {
     const section = qs("discoveredSection");
     const list = qs("discoveredList");
 
-    section.style.display = "block";
+    section.hidden = false;
 
     const item = document.createElement("div");
     item.className = "discovered-peer-item";
@@ -199,7 +295,8 @@ function addDiscoveredPeer(peer) {
     info.append(name, addr);
 
     const button = document.createElement("button");
-    button.className = "btn btn-connect";
+    button.className = "btn-connect";
+    button.type = "button";
     button.textContent = "Connect";
     button.addEventListener("click", () => connectToDiscoveredPeer(peer.address));
 
@@ -224,12 +321,12 @@ function connectToDiscoveredPeer(address) {
     setStatus("Connecting to peer...");
     setTimeout(() => {
         qs("discoveredList").innerHTML = "";
-        qs("discoveredSection").style.display = "none";
+        qs("discoveredSection").hidden = true;
     }, 2000);
 }
 
 qs("closeDiscovered").onclick = () => {
-    qs("discoveredSection").style.display = "none";
+    qs("discoveredSection").hidden = true;
     qs("discoveredList").innerHTML = "";
 };
 
@@ -258,20 +355,51 @@ function peerLabel(id) {
     return shortId(id);
 }
 
+function initialFor(id) {
+    const label = peerLabel(id) || "?";
+    return label.trim().charAt(0).toUpperCase() || "?";
+}
+
+function verifiedMark() {
+    const mark = document.createElement("span");
+    mark.className = "verified-mark";
+    mark.title = "Verified contact";
+    mark.setAttribute("aria-label", "Verified contact");
+    return mark;
+}
+
+function nameRow(name, id) {
+    const row = document.createElement("div");
+    row.className = "peer-name-row";
+
+    const label = document.createElement("div");
+    label.className = "peer-name";
+    label.textContent = name;
+
+    row.append(label);
+    if (id && verifiedPeers.has(id)) {
+        row.append(verifiedMark());
+    }
+    return row;
+}
+
 // =====================
 // PEER RENDERING
 // =====================
 function renderPeers() {
     const list = qs("peersList");
     list.innerHTML = "";
+    qs("peerCount").textContent = String(peers.length);
 
     if (peers.length === 0) {
-        list.innerHTML = `
-            <div class="empty-state">
-                <p>No connected peers yet</p>
-                <small>Click "Discover" to find peers on the network</small>
-            </div>
-        `;
+        const empty = document.createElement("div");
+        empty.className = "empty-state";
+        const title = document.createElement("p");
+        title.textContent = "No connected peers";
+        const hint = document.createElement("small");
+        hint.textContent = "Use Discover or Connect to find someone.";
+        empty.append(title, hint);
+        list.appendChild(empty);
         return;
     }
 
@@ -282,16 +410,23 @@ function renderPeers() {
             row.classList.add("active");
         }
 
-        const name = document.createElement("div");
-        name.className = "peer-name";
-        name.textContent = peer.nickname || shortId(peer.id);
+        const avatar = document.createElement("div");
+        avatar.className = "avatar";
+        avatar.textContent = initialFor(peer.id);
+
+        const meta = document.createElement("div");
+        meta.className = "peer-meta";
+
+        const name = peer.nickname || shortId(peer.id);
+        meta.append(nameRow(name, peer.id));
 
         const id = document.createElement("div");
         id.className = "peer-id";
         id.textContent = peer.shortId || shortId(peer.id);
+        meta.append(id);
 
-        row.append(name, id);
-        row.onclick = () => openPeer(peer.id, name.textContent);
+        row.append(avatar, meta);
+        row.onclick = () => openPeer(peer.id, name);
         list.appendChild(row);
     });
 }
@@ -301,12 +436,12 @@ function renderRequests() {
     const list = qs("requestsList");
 
     if (pendingRequests.length === 0) {
-        section.style.display = "none";
+        section.hidden = true;
         list.innerHTML = "";
         return;
     }
 
-    section.style.display = "block";
+    section.hidden = false;
     list.innerHTML = "";
 
     pendingRequests.forEach(request => {
@@ -326,11 +461,13 @@ function renderRequests() {
 
         const reject = document.createElement("button");
         reject.className = "btn btn-small btn-reject";
+        reject.type = "button";
         reject.textContent = "Reject";
         reject.onclick = () => respondToRequest(request.peerId, false);
 
         const accept = document.createElement("button");
         accept.className = "btn btn-small btn-accept";
+        accept.type = "button";
         accept.textContent = "Accept";
         accept.onclick = () => respondToRequest(request.peerId, true);
 
@@ -359,17 +496,20 @@ function renderTrusted() {
     const list = qs("trustedList");
 
     if (trustedPeers.length === 0) {
-        section.style.display = "none";
+        section.hidden = true;
         list.innerHTML = "";
         return;
     }
 
-    section.style.display = "block";
+    section.hidden = false;
     list.innerHTML = "";
 
     trustedPeers.forEach(peer => {
         const row = document.createElement("div");
         row.className = "trusted-item";
+        if (activePeer === peer.peerId) {
+            row.classList.add("active");
+        }
 
         const dot = document.createElement("span");
         dot.className = "peer-status-dot";
@@ -380,18 +520,37 @@ function renderTrusted() {
         const meta = document.createElement("div");
         meta.className = "peer-meta";
 
-        const name = document.createElement("div");
-        name.className = "peer-name";
-        name.textContent = peer.nickname || shortId(peer.peerId);
+        const name = peer.nickname || shortId(peer.peerId);
+        meta.append(nameRow(name, peer.peerId));
 
         const id = document.createElement("div");
         id.className = "peer-id";
         id.textContent = shortId(peer.peerId);
+        meta.append(id);
 
-        meta.append(name, id);
+        const actions = document.createElement("div");
+        actions.className = "row-actions";
+
+        if (!isConnected(peer.peerId)) {
+            const reconnect = document.createElement("button");
+            reconnect.className = "btn btn-small";
+            reconnect.type = "button";
+            reconnect.textContent = "Reconnect";
+            reconnect.onclick = event => {
+                event.stopPropagation();
+                if (!wsReady()) return;
+                ws.send(JSON.stringify({
+                    type: "reconnect_peer",
+                    payload: { peerId: peer.peerId }
+                }));
+                setStatus("Reconnecting...");
+            };
+            actions.append(reconnect);
+        }
 
         const remove = document.createElement("button");
-        remove.className = "btn btn-small btn-danger";
+        remove.className = "btn btn-small btn-danger-ghost";
+        remove.type = "button";
         remove.textContent = "Remove";
         remove.onclick = event => {
             event.stopPropagation();
@@ -405,29 +564,10 @@ function renderTrusted() {
             renderOffline();
             setStatus("Saved peer removed");
         };
-
-        const actions = document.createElement("div");
-        actions.className = "row-actions";
-
-        if (!isConnected(peer.peerId)) {
-            const reconnect = document.createElement("button");
-            reconnect.className = "btn btn-small";
-            reconnect.textContent = "Reconnect";
-            reconnect.onclick = event => {
-                event.stopPropagation();
-                if (!wsReady()) return;
-                ws.send(JSON.stringify({
-                    type: "reconnect_peer",
-                    payload: { peerId: peer.peerId }
-                }));
-                setStatus("Reconnecting...");
-            };
-            actions.append(reconnect);
-        }
         actions.append(remove);
 
         row.append(dot, meta, actions);
-        row.onclick = () => openPeer(peer.peerId, name.textContent);
+        row.onclick = () => openPeer(peer.peerId, name);
         list.appendChild(row);
     });
 }
@@ -442,33 +582,35 @@ function renderOffline() {
     });
 
     if (entries.length === 0) {
-        section.style.display = "none";
+        section.hidden = true;
         list.innerHTML = "";
         return;
     }
 
-    section.style.display = "block";
+    section.hidden = false;
     list.innerHTML = "";
 
     entries.forEach(peer => {
         const row = document.createElement("div");
         row.className = "offline-item";
+        if (activePeer === peer.peerId) {
+            row.classList.add("active");
+        }
 
         const meta = document.createElement("div");
         meta.className = "peer-meta";
 
-        const name = document.createElement("div");
-        name.className = "peer-name";
-        name.textContent = peer.nickname || peer.shortId || shortId(peer.peerId);
+        const name = peer.nickname || peer.shortId || shortId(peer.peerId);
+        meta.append(nameRow(name, peer.peerId));
 
         const id = document.createElement("div");
         id.className = "peer-id";
         id.textContent = peer.shortId || shortId(peer.peerId);
-
-        meta.append(name, id);
+        meta.append(id);
 
         const reconnect = document.createElement("button");
         reconnect.className = "btn btn-small";
+        reconnect.type = "button";
         reconnect.textContent = "Reconnect";
         reconnect.onclick = event => {
             event.stopPropagation();
@@ -481,7 +623,7 @@ function renderOffline() {
         };
 
         row.append(meta, reconnect);
-        row.onclick = () => openPeer(peer.peerId, name.textContent);
+        row.onclick = () => openPeer(peer.peerId, name);
         list.appendChild(row);
     });
 }
@@ -493,7 +635,7 @@ function openPeer(id, name) {
     activePeer = id;
     activePeerName = name || peerLabel(id);
 
-    qs("chatTitle").textContent = `Chat with ${activePeerName}`;
+    closeVerifyModal();
 
     renderPeers();
     renderTrusted();
@@ -507,13 +649,22 @@ function updateActiveState() {
 
     qs("messageInput").disabled = !activePeer || !connected;
     qs("sendBtn").disabled = !activePeer || !connected;
+    qs("verifyBtn").disabled = !activePeer;
     qs("savePeerBtn").disabled = !activePeer;
     qs("clearHistoryBtn").disabled = !activePeer;
     qs("disconnectBtn").disabled = !activePeer || !connected;
 
-    const status = qs("statusIndicator");
-    status.textContent = connected ? "●" : "○";
-    status.style.color = connected ? "#16a34a" : "#9ca3af";
+    qs("chatTitle").textContent = activePeer ? activePeerName : "Select a peer";
+    qs("chatAvatar").textContent = activePeer ? initialFor(activePeer) : "?";
+
+    const statusDot = qs("statusDot");
+    statusDot.classList.toggle("online", connected);
+    qs("statusText").textContent = activePeer
+        ? (connected ? "Online" : "Offline")
+        : "No conversation selected";
+
+    qs("verifiedBadge").hidden = !(activePeer && verifiedPeers.has(activePeer));
+    qs("messageInput").placeholder = connected ? "Write a message" : "Peer is offline";
 }
 
 function mergeHistory(payload) {
@@ -583,12 +734,22 @@ function renderMessages() {
     const messages = messagesByPeer[activePeer] || [];
 
     if (messages.length === 0) {
-        box.innerHTML = `
-            <div class="empty-chat">
-                <p>No messages yet</p>
-                <small>Start the conversation!</small>
-            </div>
-        `;
+        const empty = document.createElement("div");
+        empty.className = "empty-chat";
+
+        const icon = document.createElement("div");
+        icon.className = "empty-icon";
+        icon.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5.5h16v10H9l-5 4v-14Z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></svg>';
+
+        const title = document.createElement("p");
+        title.textContent = "No messages yet";
+        const hint = document.createElement("small");
+        hint.textContent = activePeer
+            ? "Start the conversation."
+            : "Choose a peer from the sidebar to start chatting.";
+
+        empty.append(icon, title, hint);
+        box.appendChild(empty);
         return;
     }
 
@@ -596,9 +757,9 @@ function renderMessages() {
         const row = document.createElement("div");
         row.className = message.isOwn ? "msg own" : "msg";
 
-        const time = new Date(message.timestamp).toLocaleTimeString('en-US', {
-            hour: '2-digit',
-            minute: '2-digit'
+        const time = new Date(message.timestamp).toLocaleTimeString("en-US", {
+            hour: "2-digit",
+            minute: "2-digit"
         });
 
         const header = document.createElement("div");
@@ -621,6 +782,104 @@ function renderMessages() {
 }
 
 // =====================
+// VERIFICATION
+// =====================
+function requestVerification(peerId) {
+    if (!wsReady() || !peerId) return;
+    ws.send(JSON.stringify({
+        type: "get_verification",
+        payload: { peerId: peerId }
+    }));
+}
+
+function openVerifyModal() {
+    if (!activePeer) return;
+
+    verificationPeer = activePeer;
+    verificationVerified = verifiedPeers.has(activePeer);
+    qs("verifySubtitle").textContent = `Compare this safety number with ${activePeerName}.`;
+    qs("verifyHelp").textContent = verifyHelpDefault;
+    qs("verifyModal").hidden = false;
+
+    renderVerification();
+    requestVerification(activePeer);
+}
+
+function closeVerifyModal() {
+    qs("verifyModal").hidden = true;
+    verificationPeer = null;
+}
+
+function renderVerification() {
+    const status = qs("verificationStatus");
+    status.textContent = verificationVerified ? "Verified" : "Not verified";
+    status.classList.toggle("verified", verificationVerified);
+
+    const box = qs("safetyNumber");
+    box.innerHTML = "";
+
+    const number = verificationPeer ? safetyNumbers[verificationPeer] : "";
+
+    if (!number) {
+        const placeholder = document.createElement("span");
+        placeholder.className = "safety-placeholder";
+        placeholder.textContent = "Loading safety number...";
+        box.appendChild(placeholder);
+    } else {
+        number.split(" ").forEach(group => {
+            const cell = document.createElement("div");
+            cell.className = "safety-group";
+            cell.textContent = group;
+            box.appendChild(cell);
+        });
+    }
+
+    const mark = qs("markVerified");
+    mark.textContent = verificationVerified ? "Remove verification" : "Mark as verified";
+    mark.disabled = !number;
+
+    qs("copySafety").disabled = !number;
+}
+
+qs("verifyBtn").onclick = openVerifyModal;
+qs("closeVerify").onclick = closeVerifyModal;
+
+qs("verifyModal").addEventListener("click", event => {
+    if (event.target === qs("verifyModal")) {
+        closeVerifyModal();
+    }
+});
+
+document.addEventListener("keydown", event => {
+    if (event.key === "Escape" && !qs("verifyModal").hidden) {
+        closeVerifyModal();
+    }
+});
+
+qs("markVerified").onclick = () => {
+    if (!verificationPeer || !wsReady()) return;
+    ws.send(JSON.stringify({
+        type: "set_verification",
+        payload: {
+            peerId: verificationPeer,
+            verified: !verificationVerified
+        }
+    }));
+};
+
+qs("copySafety").onclick = async () => {
+    const number = verificationPeer ? safetyNumbers[verificationPeer] : "";
+    if (!number) return;
+
+    try {
+        await navigator.clipboard.writeText(number);
+        setStatus("Safety number copied");
+    } catch (error) {
+        setStatus("Could not copy the safety number");
+    }
+};
+
+// =====================
 // BUTTON ACTIONS
 // =====================
 qs("discoverBtn").onclick = () => {
@@ -630,7 +889,7 @@ qs("discoverBtn").onclick = () => {
     }
 
     qs("discoveredList").innerHTML = "";
-    qs("discoveredSection").style.display = "none";
+    qs("discoveredSection").hidden = true;
 
     ws.send(JSON.stringify({ type: "discover_peers" }));
     setStatus("Starting discovery...");
@@ -638,7 +897,7 @@ qs("discoverBtn").onclick = () => {
 
 qs("sendBtn").onclick = () => sendMessage();
 
-qs("messageInput").addEventListener("keypress", event => {
+qs("messageInput").addEventListener("keydown", event => {
     if (event.key === "Enter" && !event.shiftKey) {
         event.preventDefault();
         sendMessage();

@@ -37,6 +37,11 @@ All notable changes to the public core are documented here. The project does not
 - Web demo support for connection requests, peer history, saved peers, offline peers, reconnect status and backend errors.
 - A `to` field on web messages so own messages are routed to the correct conversation.
 - CLI messages are now broadcast to web and Flutter clients.
+- Contact verification with a symmetric 60-digit safety number derived from both identity public keys.
+- A local verification marker stored in `verified_peers.json`.
+- `/verify [ok|remove]` in the CLI and a verification dialog in the web and Flutter clients.
+- A shared light and dark design system for the web demo and the Flutter client.
+- A theme toggle in the web demo. The Flutter client follows the system theme.
 
 ### Changed
 

@@ -129,6 +129,14 @@ The receiver verifies that the envelope sender matches the remote peer ID of the
 - A peer that receives an unknown type returns an `error` envelope.
 - The legacy line protocol remains until both clients support v2.
 
+## Contact verification
+
+- The safety number is a local presentation aid. It is not sent on the wire.
+- It is derived from both identity public keys, sorted by peer ID, with SHA-256 and a domain separator.
+- Twelve 5-digit groups make manual comparison practical.
+- The local verification marker is device-local. A remote peer cannot set it or read it.
+- Verification does not change the protocol session. It only records that the user compared the fingerprint.
+
 ## Security notes
 
 - The envelope does not replace transport encryption. libp2p Noise remains the transport trust anchor.

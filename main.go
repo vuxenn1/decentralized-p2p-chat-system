@@ -78,8 +78,9 @@ type StreamManager struct {
 	localNick string
 	peerNicks map[peerstore.ID]string
 
-	historyStore *storage.HistoryStore
-	peerStore    *storage.PeerStore
+	historyStore      *storage.HistoryStore
+	peerStore         *storage.PeerStore
+	verificationStore *storage.VerificationStore
 
 	pendingApprovals   map[peerstore.ID]chan bool
 	pendingApprovalsMu sync.Mutex
@@ -467,6 +468,8 @@ func (sm *StreamManager) handleCommand(cmd string) {
 			return
 		}
 		sm.removeSavedPeer(num)
+	case "/verify":
+		sm.showSafetyNumber(parts[1:])
 	case "/latencytest":
 		if len(parts) < 2 {
 			fmt.Println("Usage: '/latencytest <small|medium|large>'")
@@ -627,6 +630,7 @@ func (sm *StreamManager) showHelp() {
 	fmt.Println(colorize(93, "/save <peerid> <nick>") + "  - Save a peer with custom nick")
 	fmt.Println(colorize(93, "/rename <number> <nick>") + " - Rename a saved peer")
 	fmt.Println(colorize(93, "/remove <number>") + "     - Remove a saved peer")
+	fmt.Println(colorize(93, "/verify [ok|remove]") + " - Show or set contact verification")
 	fmt.Println(colorize(93, "/help") + "               - Show this help message")
 	fmt.Println(colorize(94, "----------------------"))
 	fmt.Printf("Type any message (without %s) to send to active peer\n\n", colorize(93, "/"))
@@ -1129,6 +1133,11 @@ func main() {
 		ps, psErr := storage.NewPeerStore(dir)
 		if psErr == nil {
 			sm.peerStore = ps
+		}
+
+		vs, vsErr := storage.NewVerificationStore(dir)
+		if vsErr == nil {
+			sm.verificationStore = vs
 		}
 
 		hs, hsErr := storage.NewHistoryStore(dir, privKeyBytes)

@@ -282,6 +282,35 @@ func (wc *WebClient) handleWSMessage(msg WSMessage) {
 			}
 			_ = wc.sm.historyStore.ClearHistory(pid.String())
 		}
+
+	case "get_verification":
+		var p struct {
+			PeerID string `json:"peerId"`
+		}
+		json.Unmarshal(msg.Payload, &p)
+		if p.PeerID != "" {
+			wc.sendVerification(p.PeerID)
+		}
+
+	case "set_verification":
+		var p struct {
+			PeerID   string `json:"peerId"`
+			Verified bool   `json:"verified"`
+		}
+		json.Unmarshal(msg.Payload, &p)
+		if wc.sm.verificationStore != nil && p.PeerID != "" {
+			pid, err := peerstore.Decode(p.PeerID)
+			if err == nil {
+				if err := wc.sm.verificationStore.SetVerified(pid.String(), p.Verified); err == nil {
+					wc.sendVerification(p.PeerID)
+					wc.broadcastVerifiedPeers()
+					return
+				}
+			}
+		}
+		if p.PeerID != "" {
+			wc.sendVerification(p.PeerID)
+		}
 	}
 }
 
@@ -353,6 +382,7 @@ func (wc *WebClient) sendInitialState(conn *websocket.Conn) {
 	}
 	wc.sendToClient(conn, "node_info", info)
 	wc.sendToClient(conn, "peers_list", wc.getPeersList())
+	wc.sendToClient(conn, "verified_peers_list", wc.verifiedPeerIDs())
 
 	// Send any pending connection requests
 	wc.pendingReqMu.Lock()
@@ -582,6 +612,58 @@ func NotifyTrustedPeersUpdate(ps *storage.PeerStore) {
 		return
 	}
 	wc.broadcast("trusted_peers_list", peers)
+}
+
+func (wc *WebClient) verifiedPeerIDs() []string {
+	if wc.sm.verificationStore == nil {
+		return []string{}
+	}
+	ids, err := wc.sm.verificationStore.VerifiedPeerIDs()
+	if err != nil || ids == nil {
+		return []string{}
+	}
+	return ids
+}
+
+func (wc *WebClient) broadcastVerifiedPeers() {
+	wc.broadcast("verified_peers_list", wc.verifiedPeerIDs())
+}
+
+func (wc *WebClient) sendVerification(peerIDStr string) {
+	payload := map[string]interface{}{
+		"peerId":       peerIDStr,
+		"safetyNumber": "",
+		"verified":     false,
+		"keyAvailable": false,
+	}
+
+	pid, err := peerstore.Decode(peerIDStr)
+	if err != nil {
+		payload["message"] = "Invalid peer ID"
+		wc.broadcast("peer_verification", payload)
+		return
+	}
+
+	if wc.sm.verificationStore != nil {
+		payload["verified"] = wc.sm.verificationStore.IsVerified(pid.String())
+	}
+
+	number, err := safetyNumber(wc.sm.node.Peerstore(), wc.sm.node.ID(), pid)
+	if err != nil {
+		payload["message"] = "Peer public key is not available yet."
+		wc.broadcast("peer_verification", payload)
+		return
+	}
+
+	payload["safetyNumber"] = number
+	payload["keyAvailable"] = true
+	wc.broadcast("peer_verification", payload)
+}
+
+func NotifyVerifiedPeersUpdate() {
+	if wc := webClient.Load(); wc != nil {
+		wc.broadcastVerifiedPeers()
+	}
 }
 
 func NotifyPeerDisconnected(peerID, nickname, shortID string) {

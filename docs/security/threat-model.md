@@ -50,12 +50,14 @@ Current mitigation:
 - Direction-separated keys reject reflection.
 - Replay counters are checked after authentication.
 - Connection approval is required before a chat stream is accepted.
+- A symmetric safety number derived from both identity public keys can be compared out of band. The verification marker is stored locally and is never trusted from the remote side.
 
 Residual risk:
 
 - The application-layer handshake signs the transcript with the Ed25519 identity and verifies the remote libp2p public key. Formal verification is still pending.
 - Replay handling uses a 64-packet sliding window. Duplicates and packets older than the window are rejected. Limited reordering is accepted.
 - No formal verification yet.
+- Contact verification is manual and optional. The safety number proves that both sides see the same identity keys, but users must still compare it over a trusted channel.
 
 ### C. Malicious peer
 
@@ -179,8 +181,11 @@ Residual risk:
 | Reflection rejection | `security.TestReflectionRejected` |
 | Forged packet does not burn nonce | `security.TestForgedPacketDoesNotBurnNonce` |
 | Replay rejection | `security.TestReplayRejected` |
-| Out-of-order rejection | `security.TestOutOfOrderCounterRejected` |
+| Replay window behavior | `security.TestOutOfOrderCounterAccepted`, `security.TestReplayWindowRejectsOldPacket` |
 | Handshake reader reuse | `security.TestHandshakeReaderKeepsFollowingData` |
+| Safety number symmetry | `TestSafetyNumberIsSymmetric` |
+| Safety number per peer | `TestSafetyNumberDiffersPerPeer` |
+| Verification state | `storage.TestVerificationStoreRoundTrip` |
 | Path traversal rejection | `storage.TestClearHistoryRejectsTraversal`, `storage.TestSaveMessageRejectsTraversal` |
 | Corrupt history preservation | `storage.TestCorruptHistoryIsNotOverwritten` |
 | Atomic replacement | `storage.TestWriteReplacesExistingFile` |

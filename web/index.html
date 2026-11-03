@@ -1,101 +1,195 @@
 <!DOCTYPE html>
-<html lang="tr">
+<html lang="en" data-theme="light">
 <head>
     <meta charset="UTF-8">
-    <title>P2P Chat</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="color-scheme" content="light dark">
+    <title>Ağdaş</title>
     <link rel="stylesheet" href="styles.css">
+    <script>
+        (function () {
+            var theme = null;
+            try {
+                var params = new URLSearchParams(location.search);
+                var forced = params.get('theme');
+                if (forced === 'light' || forced === 'dark') {
+                    theme = forced;
+                } else {
+                    var stored = localStorage.getItem('agdas_theme');
+                    if (stored === 'light' || stored === 'dark') {
+                        theme = stored;
+                    }
+                }
+            } catch (error) {
+                theme = null;
+            }
+            if (!theme) {
+                theme = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+            }
+            document.documentElement.dataset.theme = theme;
+        })();
+    </script>
 </head>
 <body>
 
-<div class="header">
-    <div class="header-top">
-        <div class="logo">
-            <img src="logo.png" alt="P2P Chat Logo" class="logo-img">
+<header class="app-header">
+    <div class="brand">
+        <img src="logo.png" alt="" class="brand-logo">
+        <div class="brand-copy">
+            <span class="brand-name">ağdaş</span>
+            <span class="brand-note">Peer to peer chat</span>
         </div>
     </div>
-    <div class="node-info">
-        <div class="info-item">
-            <span class="label">Nickname:</span>
-            <span class="value" id="nodeNick">...</span>
-        </div>
-        <div class="info-item">
-            <span class="label">Peer ID:</span>
-            <span class="value" id="nodeId">Connecting...</span>
-        </div>
-        <div class="info-item">
-            <span class="label">Address:</span>
-            <span class="value" id="nodeAddr">Connecting...</span>
-        </div>
-    </div>
-</div>
 
-<div class="main-content">
+    <div class="node-meta">
+        <div class="meta-item">
+            <span class="meta-label">You</span>
+            <span class="meta-value" id="nodeNick">...</span>
+        </div>
+        <div class="meta-item">
+            <span class="meta-label">Peer ID</span>
+            <span class="meta-value mono" id="nodeId">Connecting...</span>
+        </div>
+        <div class="meta-item meta-address">
+            <span class="meta-label">Address</span>
+            <span class="meta-value mono" id="nodeAddr">Connecting...</span>
+        </div>
+    </div>
+
+    <button class="icon-button theme-toggle" id="themeToggle" type="button" aria-label="Switch to dark theme">
+        <svg class="theme-icon icon-moon" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M20.5 14.2A8.3 8.3 0 0 1 9.8 3.5 8.5 8.5 0 1 0 20.5 14.2Z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/>
+        </svg>
+        <svg class="theme-icon icon-sun" viewBox="0 0 24 24" aria-hidden="true">
+            <circle cx="12" cy="12" r="4" fill="none" stroke="currentColor" stroke-width="1.7"/>
+            <path d="M12 2.5v2M12 19.5v2M2.5 12h2M19.5 12h2M5.3 5.3l1.4 1.4M17.3 17.3l1.4 1.4M18.7 5.3l-1.4 1.4M6.7 17.3l-1.4 1.4" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
+        </svg>
+    </button>
+</header>
+
+<div class="status-toast" id="discoveryStatus" role="status" hidden></div>
+
+<div class="app-shell">
     <aside class="sidebar">
-        <div class="sidebar-header">
-            <h2>Connected Peers</h2>
-            <div class="peer-actions">
-                <button class="btn" id="discoverBtn" title="Discover peers on network">Discover</button>
-                <button class="btn" id="connectBtn" title="Connect to specific peer">Connect</button>
+        <div class="sidebar-top">
+            <div class="sidebar-heading">
+                <h2>Peers</h2>
+                <span class="count-badge" id="peerCount">0</span>
+            </div>
+            <div class="sidebar-actions">
+                <button class="btn btn-secondary" id="discoverBtn" type="button">Discover</button>
+                <button class="btn btn-secondary" id="connectBtn" type="button">Connect</button>
             </div>
         </div>
 
-        <div id="discoveryStatus" class="discovery-status" style="display: none;"></div>
+        <div class="sidebar-scroll">
+            <section class="side-section" id="requestsSection" hidden>
+                <div class="section-title">Connection requests</div>
+                <div id="requestsList"></div>
+            </section>
 
-        <div class="side-section" id="requestsSection" style="display: none;">
-            <div class="side-section-title">Connection Requests</div>
-            <div id="requestsList"></div>
-        </div>
+            <section class="side-section">
+                <div class="section-title">Connected</div>
+                <div class="peer-list" id="peersList">
+                    <div class="empty-state">
+                        <p>No connected peers</p>
+                        <small>Use Discover or Connect to find someone.</small>
+                    </div>
+                </div>
+            </section>
 
-        <div class="side-section" id="trustedSection" style="display: none;">
-            <div class="side-section-title">Saved Peers</div>
-            <div id="trustedList"></div>
-        </div>
+            <section class="side-section" id="offlineSection" hidden>
+                <div class="section-title">Offline</div>
+                <div id="offlineList"></div>
+            </section>
 
-        <div class="peers-list" id="peersList">
-            <div class="empty-state">
-                <p>No connected peers yet</p>
-                <small>Click "Discover" to find peers</small>
-            </div>
-        </div>
+            <section class="side-section" id="trustedSection" hidden>
+                <div class="section-title">Saved peers</div>
+                <div id="trustedList"></div>
+            </section>
 
-        <div class="side-section" id="offlineSection" style="display: none;">
-            <div class="side-section-title">Offline</div>
-            <div id="offlineList"></div>
-        </div>
-
-        <div class="discovered-section" id="discoveredSection" style="display: none;">
-            <div class="discovered-header">
-                <h3>Discovered Peers</h3>
-                <button class="btn-close" id="closeDiscovered">✕</button>
-            </div>
-            <div class="discovered-list" id="discoveredList"></div>
+            <section class="side-section discovered-section" id="discoveredSection" hidden>
+                <div class="section-title discovered-heading">
+                    <span>Discovered</span>
+                    <button class="icon-button icon-small" id="closeDiscovered" type="button" aria-label="Close discovered peers">
+                        <svg viewBox="0 0 24 24" aria-hidden="true">
+                            <path d="M6 6l12 12M18 6 6 18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+                        </svg>
+                    </button>
+                </div>
+                <div class="discovered-list" id="discoveredList"></div>
+            </section>
         </div>
     </aside>
 
-    <main class="chat-area">
+    <main class="chat">
         <div class="chat-header">
-            <h3 id="chatTitle">Select a peer to start chatting</h3>
-            <span class="status" id="statusIndicator">●</span>
+            <div class="chat-identity">
+                <div class="avatar" id="chatAvatar">?</div>
+                <div class="chat-copy">
+                    <div class="chat-name-line">
+                        <h3 id="chatTitle">Select a peer</h3>
+                        <span class="verified-mark chat-verified" id="verifiedBadge" title="Verified contact" hidden></span>
+                    </div>
+                    <div class="chat-status">
+                        <span class="status-dot" id="statusDot"></span>
+                        <span id="statusText">No conversation selected</span>
+                    </div>
+                </div>
+            </div>
+
             <div class="chat-actions">
-                <button class="btn btn-small" id="savePeerBtn" disabled>Save</button>
-                <button class="btn btn-small" id="clearHistoryBtn" disabled>Clear</button>
-                <button class="btn btn-small btn-danger" id="disconnectBtn" disabled>Disconnect</button>
+                <button class="btn btn-ghost" id="verifyBtn" type="button" disabled>Verify</button>
+                <button class="btn btn-ghost" id="savePeerBtn" type="button" disabled>Save</button>
+                <button class="btn btn-ghost" id="clearHistoryBtn" type="button" disabled>Clear</button>
+                <button class="btn btn-danger-ghost" id="disconnectBtn" type="button" disabled>Disconnect</button>
             </div>
         </div>
 
-        <div class="messages-container" id="messages">
+        <div class="messages" id="messages">
             <div class="empty-chat">
-                <p>No messages yet</p>
-                <small>Start a conversation by selecting a peer</small>
+                <div class="empty-icon">
+                    <svg viewBox="0 0 24 24" aria-hidden="true">
+                        <path d="M4 5.5h16v10H9l-5 4v-14Z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>
+                    </svg>
+                </div>
+                <p>No conversation selected</p>
+                <small>Choose a peer from the sidebar to start chatting.</small>
             </div>
         </div>
 
-        <div class="message-input-area">
-            <input type="text" id="messageInput" placeholder="Type your message... " disabled>
-            <button class="btn btn-primary" id="sendBtn" disabled>Send</button>
+        <div class="composer">
+            <input type="text" id="messageInput" placeholder="Write a message" autocomplete="off" disabled>
+            <button class="btn btn-primary" id="sendBtn" type="button" disabled>Send</button>
         </div>
     </main>
+</div>
+
+<div class="modal-backdrop" id="verifyModal" hidden>
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="verifyTitle">
+        <div class="modal-header">
+            <div>
+                <h3 id="verifyTitle">Verify contact</h3>
+                <p class="modal-subtitle" id="verifySubtitle">Compare this safety number with your peer in person or over another channel.</p>
+            </div>
+            <button class="icon-button icon-small" id="closeVerify" type="button" aria-label="Close verification">
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M6 6l12 12M18 6 6 18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+                </svg>
+            </button>
+        </div>
+
+        <div class="verification-state" id="verificationStatus">Not verified</div>
+        <div class="safety-number" id="safetyNumber">
+            <span class="safety-placeholder">Loading safety number...</span>
+        </div>
+        <p class="modal-help" id="verifyHelp">If both sides show the same number, the conversation is encrypted without a man in the middle.</p>
+
+        <div class="modal-actions">
+            <button class="btn btn-secondary" id="copySafety" type="button">Copy number</button>
+            <button class="btn btn-primary" id="markVerified" type="button">Mark as verified</button>
+        </div>
+    </div>
 </div>
 
 <script src="app.js"></script>

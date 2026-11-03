@@ -50,6 +50,7 @@ The APK is a build artifact of the private Flutter app. It is not part of this r
 - **Application layer:** a second X25519 + ChaCha20-Poly1305 layer is present. It uses direction-separated keys, transcript binding and a 64-packet replay window. The handshake signs the transcript with the Ed25519 identity and verifies the remote libp2p public key. It remains defense in depth.
 - **Local API:** the browser API binds to `127.0.0.1` and requires a per-run token. The token is written to `api.token` in the data directory and printed in the web URL fragment.
 - **Local storage:** message history is encrypted at rest. The key is derived from the local identity key. The identity key is currently stored as a file, not in an OS keystore.
+- **Contact verification:** the client can derive a 60-digit safety number from both Ed25519 identity public keys. The number is symmetric and changes when either identity changes. Users compare it out of band and can mark the contact as verified locally. The verification marker is stored on the device, not published to the network.
 - **Discovery:** the public IPFS DHT is used by default. This exposes peer IDs and network addresses to the DHT. A LAN-first discovery mode is planned.
 
 Known limitations are tracked in the project roadmap and issue tracker.
@@ -77,6 +78,7 @@ On first run, an Ed25519 identity is created under `~/.p2pchat`. Use `--datadir`
 /save <peerid> <nick>   Save a trusted peer with a custom nickname
 /rename <number> <nick> Rename a saved peer
 /remove <number>        Remove a saved peer
+/verify [ok|remove]     Show the safety number or set the local verification marker
 /disconnect             Disconnect from the active peer
 /help                   Show all commands
 ```
@@ -101,6 +103,8 @@ Without `--web`, the API still runs on loopback and the root path returns a shor
 
 The web demo is a reference client, not the primary product. It is intentionally local-only.
 
+The interface has a light and a dark theme. It follows the operating system preference by default and remembers an explicit choice. The chat header has a verification action that shows the safety number for the selected peer and lets the user mark the contact as verified on this device.
+
 ## Build and test
 
 ```bash
@@ -109,7 +113,7 @@ go test ./...
 go vet ./...
 ```
 
-The security and storage packages contain focused tests for replay-window behavior, direction separation, reflection rejection, path traversal and corrupt-file behavior.
+The security and storage packages contain focused tests for replay-window behavior, direction separation, reflection rejection, path traversal, corrupt-file behavior and contact verification state.
 
 ## Android binaries
 
@@ -129,7 +133,7 @@ The build uses `-ldflags="-s -w -checklinkname=0"`. The `checklinkname=0` flag i
 main.go          CLI, stream manager, connection approval, message loop
 web.go           local web server and WebSocket bridge
 security/        handshake and message encryption
-storage/         encrypted history and trusted peers
+storage/         encrypted history, trusted peers and verification state
 discovery/       libp2p DHT discovery
 protocol/        versioned envelope for protocol v2 (draft)
 web/             browser demo client
