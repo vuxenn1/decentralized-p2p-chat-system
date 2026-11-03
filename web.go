@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -54,7 +55,7 @@ type WSMessage struct {
 	Payload json.RawMessage `json:"payload"`
 }
 
-var webClient *WebClient
+var webClient atomic.Pointer[WebClient]
 
 func StartWebServer(sm *StreamManager, dataDir string, serveUI bool) {
 	listener, err := net.Listen("tcp", "127.0.0.1:9090")
@@ -71,7 +72,7 @@ func StartWebServer(sm *StreamManager, dataDir string, serveUI bool) {
 	}
 
 	port := listener.Addr().(*net.TCPAddr).Port
-	webClient = &WebClient{
+	client := &WebClient{
 		sm:              sm,
 		clients:         make(map[*websocket.Conn]bool),
 		writeMu:         make(map[*websocket.Conn]*sync.Mutex),
@@ -79,6 +80,7 @@ func StartWebServer(sm *StreamManager, dataDir string, serveUI bool) {
 		pendingRequests: make([]map[string]string, 0),
 		token:           token,
 	}
+	webClient.Store(client)
 
 	wsUpgrader = websocket.Upgrader{
 		CheckOrigin: func(r *http.Request) bool {
@@ -150,7 +152,8 @@ func (wc *WebClient) authorized(r *http.Request) bool {
 }
 
 func handleWebSocket(w http.ResponseWriter, r *http.Request) {
-	if !webClient.authorized(r) {
+	wc := webClient.Load()
+	if wc == nil || !wc.authorized(r) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
@@ -160,13 +163,13 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	webClient.clientsMu.Lock()
-	webClient.clients[conn] = true
-	webClient.writeMu[conn] = &sync.Mutex{}
-	webClient.clientsMu.Unlock()
+	wc.clientsMu.Lock()
+	wc.clients[conn] = true
+	wc.writeMu[conn] = &sync.Mutex{}
+	wc.clientsMu.Unlock()
 
-	webClient.sendInitialState(conn)
-	go webClient.readWebSocket(conn)
+	wc.sendInitialState(conn)
+	go wc.readWebSocket(conn)
 }
 
 func (wc *WebClient) readWebSocket(conn *websocket.Conn) {
@@ -305,7 +308,7 @@ func (wc *WebClient) handleDiscoverPeers() {
 	}
 
 	discoveredPeers := []map[string]string{}
-	timeout := time.After(DISCOVERY_TIME * time.Second)
+	timeout := time.After(discoveryTime * time.Second)
 
 loop:
 	for {
@@ -417,21 +420,10 @@ func (wc *WebClient) sendMessageToPeer(peerIDStr, content string) {
 		return
 	}
 
-	wc.sm.mu.RLock()
-	stream, ok := wc.sm.streams[peerID]
-	session, sessionOk := wc.sm.sessions[peerID]
-	wc.sm.mu.RUnlock()
-
-	if !ok || !sessionOk {
+	if _, err := wc.sm.sendChat(peerID, content); err != nil {
 		return
 	}
 
-	enc, err := session.Encrypt([]byte(content))
-	if err != nil {
-		return
-	}
-
-	stream.Write([]byte(enc + "\n"))
 	wc.addMessage(wc.sm.node.ID().String(), wc.sm.localNick, content, true, peerIDStr)
 }
 
@@ -500,56 +492,60 @@ func (wc *WebClient) sendToClient(conn *websocket.Conn, t string, payload interf
 }
 
 func NotifyWebMessage(from, fromName, content string, isOwn bool) {
-	if webClient != nil {
-		webClient.addMessage(from, fromName, content, isOwn, from)
+	if wc := webClient.Load(); wc != nil {
+		wc.addMessage(from, fromName, content, isOwn, from)
 	}
 }
 
 func NotifyWebPeerUpdate() {
-	if webClient != nil {
-		webClient.notifyPeerUpdate()
+	if wc := webClient.Load(); wc != nil {
+		wc.notifyPeerUpdate()
 	}
 }
 
 func NotifyConnectionRequest(peerID, shortID, nickname string) {
-	if webClient != nil {
-		req := map[string]string{
-			"peerId":   peerID,
-			"shortId":  shortID,
-			"nickname": nickname,
-		}
-		webClient.pendingReqMu.Lock()
-		webClient.pendingRequests = append(webClient.pendingRequests, req)
-		webClient.pendingReqMu.Unlock()
-		webClient.broadcast("connection_request", req)
+	wc := webClient.Load()
+	if wc == nil {
+		return
 	}
+	req := map[string]string{
+		"peerId":   peerID,
+		"shortId":  shortID,
+		"nickname": nickname,
+	}
+	wc.pendingReqMu.Lock()
+	wc.pendingRequests = append(wc.pendingRequests, req)
+	wc.pendingReqMu.Unlock()
+	wc.broadcast("connection_request", req)
 }
 
 func NotifyWebConnectionRejected(peerID string) {
-	if webClient != nil {
-		webClient.broadcast("connection_rejected", map[string]string{
+	if wc := webClient.Load(); wc != nil {
+		wc.broadcast("connection_rejected", map[string]string{
 			"peerId": peerID,
 		})
 	}
 }
 
 func RemovePendingRequest(peerID string) {
-	if webClient == nil {
+	wc := webClient.Load()
+	if wc == nil {
 		return
 	}
-	webClient.pendingReqMu.Lock()
-	defer webClient.pendingReqMu.Unlock()
+	wc.pendingReqMu.Lock()
+	defer wc.pendingReqMu.Unlock()
 	filtered := make([]map[string]string, 0)
-	for _, r := range webClient.pendingRequests {
+	for _, r := range wc.pendingRequests {
 		if r["peerId"] != peerID {
 			filtered = append(filtered, r)
 		}
 	}
-	webClient.pendingRequests = filtered
+	wc.pendingRequests = filtered
 }
 
 func NotifyPeerHistory(peerID string, msgs []storage.StoredMsg) {
-	if webClient == nil {
+	wc := webClient.Load()
+	if wc == nil {
 		return
 	}
 
@@ -558,26 +554,27 @@ func NotifyPeerHistory(peerID string, msgs []storage.StoredMsg) {
 		Messages []storage.StoredMsg `json:"messages"`
 	}
 
-	webClient.broadcast("peer_history", historyPayload{
+	wc.broadcast("peer_history", historyPayload{
 		PeerID:   peerID,
 		Messages: msgs,
 	})
 }
 
 func NotifyTrustedPeersUpdate(ps *storage.PeerStore) {
-	if webClient == nil || ps == nil {
+	wc := webClient.Load()
+	if wc == nil || ps == nil {
 		return
 	}
 	peers, err := ps.LoadPeers()
 	if err != nil {
 		return
 	}
-	webClient.broadcast("trusted_peers_list", peers)
+	wc.broadcast("trusted_peers_list", peers)
 }
 
 func NotifyPeerDisconnected(peerID, nickname, shortID string) {
-	if webClient != nil {
-		webClient.broadcast("peer_disconnected", map[string]string{
+	if wc := webClient.Load(); wc != nil {
+		wc.broadcast("peer_disconnected", map[string]string{
 			"peerId":   peerID,
 			"nickname": nickname,
 			"shortId":  shortID,
@@ -586,8 +583,8 @@ func NotifyPeerDisconnected(peerID, nickname, shortID string) {
 }
 
 func NotifyReconnectStatus(peerID, status, message string) {
-	if webClient != nil {
-		webClient.broadcast("reconnect_status", map[string]string{
+	if wc := webClient.Load(); wc != nil {
+		wc.broadcast("reconnect_status", map[string]string{
 			"peerId":  peerID,
 			"status":  status,
 			"message": message,

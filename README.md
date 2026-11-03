@@ -31,6 +31,10 @@ Web  ─┘          │
 
 The core owns identity, sessions, messaging, storage, discovery and transport. Clients only talk to the core.
 
+### Wire protocol
+
+The chat and control messages use the versioned v2 envelope in `protocol/`. The libp2p protocol ID is `/p2pchat/2`. Connection approval still uses a separate pre-handshake line. The application-layer handshake is not yet bound to the Ed25519 identity; libp2p Noise remains the transport trust anchor.
+
 Two clients exist:
 
 | Client | Location | Visibility |

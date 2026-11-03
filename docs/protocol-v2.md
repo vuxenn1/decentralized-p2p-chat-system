@@ -1,6 +1,6 @@
 # Protocol v2 Draft
 
-**Status:** Draft. The envelope package exists and is tested. The application still uses the legacy line protocol until the integration step.
+**Status:** Draft. The envelope is integrated for chat, nickname, latency and concurrent-test control messages. Connection approval still uses the legacy pre-handshake line. Identity binding is pending.
 
 ## Goals
 
@@ -69,7 +69,36 @@ Unknown types must be rejected with a clear error. New types require a version o
 
 ## Framing
 
-The draft uses one JSON envelope per line over the existing libp2p stream. A future revision may use length-prefixed frames or protobuf.
+The envelope is encoded as JSON, encrypted by the session layer, then written as one base64 packet line over the libp2p stream. Connection approval remains a separate pre-handshake line until the handshake is redesigned.
+
+## Body schemas
+
+### Chat
+
+```json
+{"text": "hello"}
+```
+
+Chat messages are persisted in the local history and shown in the clients.
+
+### Control
+
+```json
+{"kind": "nickname", "name": "alice"}
+{"kind": "latency_ping", "timestamp": 1767225600000, "payload": "aaaa"}
+{"kind": "latency_pong", "timestamp": 1767225600000}
+{"kind": "concurrent_test", "name": "alice", "index": 1}
+```
+
+Control messages are not persisted in the chat history and are not shown as chat messages. Unknown control kinds are ignored.
+
+## Conversation identifier
+
+The current draft uses a deterministic identifier derived from the two peer IDs. The IDs are sorted, joined with a separator and hashed with SHA-256. The first 16 bytes are encoded with base64url. Both peers compute the same value for a one-to-one conversation.
+
+## Sender validation
+
+The receiver verifies that the envelope sender matches the remote peer ID of the stream. A mismatch is rejected.
 
 ## Compatibility
 

@@ -34,3 +34,7 @@ All notable changes to the public core are documented here. The project does not
 - A corrupt history file is preserved instead of being overwritten.
 - The public README describes the public core, private Flutter app and web demo.
 - The web demo reads the token from the URL fragment and uses safe DOM text insertion.
+- Chat and control messages now use the v2 envelope.
+- Nickname exchange uses a typed control message instead of the `__NICKNAME__` prefix.
+- Latency and concurrent-test messages use control envelopes and no longer enter the chat history or the web UI.
+- The global web client pointer is atomic to avoid cross-goroutine races during shutdown and tests.

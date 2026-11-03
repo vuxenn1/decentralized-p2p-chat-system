@@ -11,10 +11,8 @@ import (
 	"os/signal"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -26,13 +24,13 @@ import (
 	multiaddr "github.com/multiformats/go-multiaddr"
 
 	"p2p-chat/discovery"
+	"p2p-chat/protocol"
 	"p2p-chat/security"
 	"p2p-chat/storage"
 )
 
-const DISCOVERY_TIME = 5
-const ChatProtocolID = "/p2pchat/0.75"
-const NickPrefix = "__NICKNAME__:"
+const discoveryTime = 5
+const ChatProtocolID = "/p2pchat/2"
 const ConnReqPrefix = "__CONNREQ__:"
 const ConnAcceptMsg = "__ACCEPT__"
 const ConnRejectMsg = "__REJECT__"
@@ -63,6 +61,7 @@ type StreamManager struct {
 	streams   map[peerstore.ID]network.Stream
 	activeID  peerstore.ID
 	mu        sync.RWMutex
+	writeMu   sync.Mutex
 	inputChan chan string
 	node      host.Host
 	ctx       context.Context
@@ -132,9 +131,8 @@ func (sm *StreamManager) AddStream(s network.Stream) {
 	go sm.readLoop(s, reader)
 
 	if sm.localNick != "" {
-		enc, err := session.Encrypt([]byte(NickPrefix + sm.localNick))
-		if err == nil {
-			_, _ = s.Write([]byte(enc + "\n"))
+		if err := sm.sendControl(peerID, controlBody{Kind: controlNickname, Name: sm.localNick}); err != nil {
+			fmt.Printf("Failed to send nickname to [%s]: %v\n", peerID, err)
 		}
 	}
 
@@ -278,79 +276,23 @@ func (sm *StreamManager) readLoop(s network.Stream, r *bufio.Reader) {
 		sm.mu.RLock()
 		session := sm.sessions[peerID]
 		sm.mu.RUnlock()
+		if session == nil {
+			fmt.Printf("Session state lost for [%s]\n", short)
+			_ = s.Close()
+			return
+		}
 
 		plain, err := session.Decrypt(strings.TrimSpace(line))
 		if err != nil {
 			continue
 		}
 
-		msg := string(plain)
-
-		if strings.HasPrefix(msg, NickPrefix) {
-			nick := strings.TrimSpace(strings.TrimPrefix(msg, NickPrefix))
-			if nick != "" {
-				sm.mu.Lock()
-				old := sm.peerNicks[peerID]
-				sm.peerNicks[peerID] = nick
-				sm.mu.Unlock()
-
-				if old != nick {
-					shortID := peerID.String()
-					if len(shortID) > 8 {
-						shortID = shortID[len(shortID)-8:]
-					}
-					fmt.Printf("Peer [%s] is now known as [%s]\n",
-						colorize(96, shortID), colorize(92, nick))
-					NotifyWebPeerUpdate()
-
-					sm.mu.RLock()
-					nick := sm.peerNicks[peerID]
-					sm.mu.RUnlock()
-					NotifyPeerDisconnected(peerID.String(), nick, short)
-				}
-			}
+		envelope, err := protocol.Decode(plain)
+		if err != nil {
+			fmt.Printf("Invalid envelope from [%s]: %v\n", short, err)
 			continue
 		}
-
-		sm.mu.RLock()
-		display := short
-		if n, ok := sm.peerNicks[peerID]; ok {
-			display = n
-		}
-		sm.mu.RUnlock()
-
-		// Message Latency Tests
-		if strings.HasPrefix(msg, "LATENCY_PING:") {
-			// Receiver side: echo back immediately
-			parts := strings.SplitN(msg, ":", 3)
-			if len(parts) >= 2 {
-				pong := fmt.Sprintf("LATENCY_PONG:%s", parts[1])
-				enc, err := session.Encrypt([]byte(pong))
-				if err == nil {
-					s.Write([]byte(enc + "\n"))
-				}
-			}
-		} else if strings.HasPrefix(msg, "LATENCY_PONG:") {
-			// Sender side: compute RTT/2
-			parts := strings.SplitN(msg, ":", 2)
-			if len(parts) == 2 {
-				sentMs, err := strconv.ParseInt(parts[1], 10, 64)
-				if err == nil {
-					rtt := time.Now().UnixMilli() - sentMs
-					fmt.Printf("LATENCY_RESULT:%d\n", rtt/2)
-				}
-			}
-			// Concurrent Connection Tests
-		} else if strings.HasPrefix(msg, "CONCURRENT_TEST:") {
-			atomic.AddInt64(&concurrentTestReceived, 1)
-			fmt.Printf("CONCURRENT_RECEIVED:%d\n", atomic.LoadInt64(&concurrentTestReceived))
-		} else {
-			coloredID := colorize(96, display)
-			coloredTime := colorize(93, time.Now().Format("15:04"))
-			fmt.Printf("[%s] [%s]: %s\n", coloredTime, coloredID, msg)
-		}
-
-		NotifyWebMessage(peerID.String(), display, msg, false)
+		sm.handleEnvelope(peerID, envelope)
 	}
 }
 
@@ -376,32 +318,14 @@ func (sm *StreamManager) HandleInput() {
 
 		sm.mu.RLock()
 		activeID := sm.activeID
-		stream, exists := sm.streams[activeID]
-		session := sm.sessions[activeID]
 		sm.mu.RUnlock()
 
-		if !exists || activeID == "" {
+		if activeID == "" {
 			fmt.Println("No active peer, Use '/list' to see available connections.")
 			continue
 		}
 
-		enc, err := session.Encrypt([]byte(text))
-		if err != nil {
-			fmt.Printf("Failed to encrypt message: %v\n", colorize(91, err.Error()))
-			continue
-		}
-
-		_, err = stream.Write([]byte(enc + "\n"))
-		if err == nil && sm.historyStore != nil {
-			go sm.historyStore.SaveMessage(activeID.String(), storage.StoredMsg{
-				ID:        fmt.Sprintf("%d", time.Now().UnixNano()),
-				From:      sm.node.ID().String(),
-				FromName:  sm.localNick,
-				Content:   text,
-				Timestamp: time.Now(),
-				IsOwn:     true,
-			})
-		}
+		envelope, err := sm.sendChat(activeID, text)
 		if err != nil {
 			fmt.Printf("Error, message sending to peer: %v\n", err)
 			sm.mu.Lock()
@@ -411,6 +335,18 @@ func (sm *StreamManager) HandleInput() {
 				sm.activeID = ""
 			}
 			sm.mu.Unlock()
+			continue
+		}
+
+		if sm.historyStore != nil {
+			go sm.historyStore.SaveMessage(activeID.String(), storage.StoredMsg{
+				ID:        envelope.ID,
+				From:      sm.node.ID().String(),
+				FromName:  sm.localNick,
+				Content:   text,
+				Timestamp: time.UnixMilli(envelope.Timestamp),
+				IsOwn:     true,
+			})
 		}
 	}
 
@@ -522,11 +458,9 @@ func (sm *StreamManager) handleCommand(cmd string) {
 func (sm *StreamManager) runLatencyTest(size string) {
 	sm.mu.RLock()
 	activeID := sm.activeID
-	stream, exists := sm.streams[activeID]
-	session := sm.sessions[activeID]
 	sm.mu.RUnlock()
 
-	if !exists || activeID == "" {
+	if activeID == "" {
 		fmt.Println("No active peer for latency test")
 		return
 	}
@@ -549,12 +483,14 @@ func (sm *StreamManager) runLatencyTest(size string) {
 
 	for i := 1; i <= 100; i++ {
 		ts := time.Now().UnixMilli()
-		msg := fmt.Sprintf("LATENCY_PING:%d:%s", ts, msgBody)
-		enc, err := session.Encrypt([]byte(msg))
-		if err != nil {
-			continue
+		if err := sm.sendControl(activeID, controlBody{
+			Kind:      controlLatencyPing,
+			Timestamp: ts,
+			Payload:   msgBody,
+		}); err != nil {
+			fmt.Printf("Latency test stopped: %v\n", err)
+			return
 		}
-		stream.Write([]byte(enc + "\n"))
 		time.Sleep(50 * time.Millisecond)
 	}
 
@@ -582,20 +518,16 @@ func (sm *StreamManager) runConcurrentTest() {
 		go func(peerID peerstore.ID) {
 			defer wg.Done()
 
-			sm.mu.RLock()
-			stream := sm.streams[peerID]
-			session := sm.sessions[peerID]
-			sm.mu.RUnlock()
-
 			nick, _ := sm.displayName(peerID)
 
 			for i := 1; i <= 20; i++ {
-				msg := fmt.Sprintf("CONCURRENT_TEST:%s:%d", nick, i)
-				enc, err := session.Encrypt([]byte(msg))
-				if err != nil {
-					continue
+				if err := sm.sendControl(peerID, controlBody{
+					Kind:  controlConcurrentTest,
+					Name:  nick,
+					Index: i,
+				}); err != nil {
+					return
 				}
-				stream.Write([]byte(enc + "\n"))
 				time.Sleep(10 * time.Millisecond)
 			}
 		}(pid)
@@ -940,7 +872,7 @@ func (sm *StreamManager) discoverPeers() {
 	}
 
 	fmt.Printf(colorize(94, "Discovering peers on the network... %s\n"),
-		colorize(93, fmt.Sprintf("Threshold is '%d' seconds", DISCOVERY_TIME)))
+		colorize(93, fmt.Sprintf("Threshold is '%d' seconds", discoveryTime)))
 
 	ctx, cancel := context.WithTimeout(sm.ctx, 30*time.Second)
 	defer cancel()
@@ -952,7 +884,7 @@ func (sm *StreamManager) discoverPeers() {
 	}
 
 	discoveredCount := 0
-	timeout := time.After(DISCOVERY_TIME * time.Second)
+	timeout := time.After(discoveryTime * time.Second)
 
 	discoverStart := time.Now()
 

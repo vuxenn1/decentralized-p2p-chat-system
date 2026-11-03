@@ -69,10 +69,10 @@ func TestAuthorized(t *testing.T) {
 }
 
 func TestWebSocketRejectsMissingToken(t *testing.T) {
-	old := webClient
-	defer func() { webClient = old }()
+	old := webClient.Load()
+	defer webClient.Store(old)
 
-	webClient = &WebClient{token: "secret-token"}
+	webClient.Store(&WebClient{token: "secret-token"})
 	server := httptest.NewServer(http.HandlerFunc(handleWebSocket))
 	defer server.Close()
 
